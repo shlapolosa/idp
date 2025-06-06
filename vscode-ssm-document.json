@@ -1,0 +1,325 @@
+{
+  "schemaVersion": "2.2",
+  "description": "Bootstrap VSCode code-server instance",
+  "parameters": {
+    "architecture": {
+      "type": "String",
+      "default": "amd64",
+      "description": "Instance architecture type",
+      "allowedValues": [
+        "arm64",
+        "amd64"
+      ]
+    },
+    "ubuntuVersion": {
+      "type": "String",
+      "default": "jammy",
+      "allowedValues": [
+        "focal",
+        "bionic",
+        "jammy"
+      ]
+    },
+    "nodeVersion": {
+      "type": "String",
+      "default": "node_20.x",
+      "allowedValues": [
+        "node_21.x",
+        "node_20.x",
+        "node_19.x"
+      ]
+    },
+    "dotNetVersion": {
+      "type": "String",
+      "default": "dotnet-sdk-8.0",
+      "allowedValues": [
+        "dotnet-sdk-8.0",
+        "dotnet-sdk-7.0",
+        "dotnet-sdk-8.0"
+      ]
+    }
+  },
+  "mainSteps": [
+    {
+      "action": "aws:runShellScript",
+      "name": "SetLoggingAndHomeDir",
+      "inputs": {
+        "runCommand": [
+          "set -o xtrace",
+          "export HOME=/home/ubuntu"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallAWSCLI",
+      "inputs": {
+        "runCommand": [
+          "apt-get update && sudo apt autoremove && DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip jq",
+          "curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip -o /tmp/aws-cli.zip",
+          "unzip -q -d /tmp /tmp/aws-cli.zip",
+          "sudo /tmp/aws/install --update",
+          "rm -rf /tmp/aws",
+          "aws --version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallContainerTools",
+      "inputs": {
+        "runCommand": [
+          "for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do sudo apt-get remove $pkg; done",
+          "sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install curl",
+          "sudo install -m 0755 -d /etc/apt/keyrings",
+          "sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc",
+          "sudo chmod a+r /etc/apt/keyrings/docker.asc",
+          "echo \"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable\" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null",
+          "sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin",
+          "sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y apt-transport-https ca-certificates gnupg lsb-release",
+          "sudo systemctl enable docker && sudo systemctl start docker",
+          "sudo docker --version",
+          "sudo groupadd docker",
+          "sudo usermod -aG docker ubuntu",
+          "newgrp docker",
+          "sudo systemctl restart docker",
+          "curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg",
+          "sudo chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg",
+          "echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list",
+          "sudo chmod 644 /etc/apt/sources.list.d/kubernetes.list",
+          "sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y kubectl",
+          "echo \"alias k=kubectl\" >> /home/ubuntu/.bashrc",
+          "ARCH=amd64",
+          "PLATFORM=$(uname -s)_$ARCH",
+          "sudo curl -sLO \"https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz\"",
+          "sudo tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm -f eksctl_$PLATFORM.tar.gz",
+          "sudo mv /tmp/eksctl /usr/local/bin",
+          "eksctl version",
+          "curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash",
+          "sudo curl -s \"https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh\"  | bash",
+          "sudo install -o root -g root -m 0755 kustomize /usr/local/bin/kustomize",
+          "kubectl completion bash | sudo tee /etc/bash_completion.d/kubectl > /dev/null",
+          "echo 'complete -o default -F __start_kubectl k' >>/home/ubuntu/.bashrc"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "Installyq",
+      "inputs": {
+        "runCommand": [
+          "sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq",
+          "sudo chmod +x /usr/bin/yq",
+          "yq --version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallTerraform",
+      "inputs": {
+        "runCommand": [
+          "apt-get update && apt-get install -y gnupg software-properties-common\nwget -O- https://apt.releases.hashicorp.com/gpg | \\\ngpg --dearmor | \\\ntee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null\ngpg --no-default-keyring \\\n--keyring /usr/share/keyrings/hashicorp-archive-keyring.gpg \\\n--fingerprint\necho \"deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \\\nhttps://apt.releases.hashicorp.com $(lsb_release -cs) main\" | \\\ntee /etc/apt/sources.list.d/hashicorp.list\napt update && apt-get install terraform\nterraform version\n"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallGit",
+      "inputs": {
+        "runCommand": [
+          "add-apt-repository ppa:git-core/ppa",
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common",
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git",
+          "sudo -u ubuntu git config --global user.email \"participant@workshops.aws\"",
+          "sudo -u ubuntu git config --global user.name \"Workshop Participant\"",
+          "sudo -u ubuntu git config --global init.defaultBranch \"main\"",
+          "git config --global --add safe.directory /modern-engineering-aws",
+          "git config --global user.email \"workshop@example.com\"",
+          "git config --global user.name \"WorkshopParticipant\"",
+          "git --version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallNvmAndNode",
+      "inputs": {
+        "runCommand": [
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl",
+          "sudo apt remove nodejs",
+          "sudo apt remove nodejs-doc",
+          "sudo dpkg --remove --force-remove-reinstreq libnode72:amd64",
+          "curl -fsSL https://deb.nodesource.com/setup_20.x | bash",
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+          "node --version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallPython",
+      "inputs": {
+        "runCommand": [
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3.11-venv python3-boto3 python3-pytest",
+          "echo 'alias pytest=pytest-3' >> /home/ubuntu/.bashrc",
+          "python3 --version",
+          "pip3 --version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallJavaAndJenv",
+      "inputs": {
+        "runCommand": [
+          "rm -rf /opt/jenv/",
+          "git clone https://github.com/jenv/jenv.git /opt/jenv/",
+          "echo 'export PATH=\"/opt/jenv/bin:$PATH\"' >> /home/ubuntu/.bashrc",
+          "echo 'eval \"$(jenv init -)\"' >> /home/ubuntu/.bashrc",
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-17-jdk-headless openjdk-8-jdk-headless",
+          "echo 'jenv add /usr/lib/jvm/java-17-openjdk-amd64/' >> /home/ubuntu/.bashrc",
+          "echo 'jenv add /usr/lib/jvm/java-8-openjdk-amd64/' >> /home/ubuntu/.bashrc"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallPythonRequirements",
+      "inputs": {
+        "runCommand": [
+          "#!/bin/bash",
+          "mkdir -p /home/ubuntu",
+          "sudo chown ubuntu:ubuntu /home/ubuntu -R",
+          "cd /home/ubuntu\n",
+          "python3 -m venv .venv",
+          "source .venv/bin/activate",
+          "if [[ -f \"requirements.txt\" ]]\nthen\n  echo 'installing requirements.txt'\n  pip3 install -r requirements.txt\nfi\n",
+          "deactivate",
+          "sudo chown ubuntu:ubuntu .venv -R"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "UpdateProfile",
+      "inputs": {
+        "runCommand": [
+          "#!/bin/bash",
+          "echo LANG=en_US.utf-8 >> /etc/environment",
+          "echo LC_ALL=en_US.UTF-8 >> /etc/environment",
+          "echo 'PATH=$PATH:/home/ubuntu/.local/bin' >> /home/ubuntu/.bashrc",
+          "echo 'export PATH' >> /home/ubuntu/.bashrc",
+          "echo 'export AWS_REGION=us-east-1' >> /home/ubuntu/.bashrc",
+          "echo 'export AWS_ACCOUNTID=123456789012' >> /home/ubuntu/.bashrc",
+          "echo 'export NEXT_TELEMETRY_DISABLED=1' >> /home/ubuntu/.bashrc",
+          "if [ \"\" != \"\" ]; then\n  echo 'export ANTHROPIC_API_KEY=' >> /home/ubuntu/.bashrc\n  echo 'export ANTHROPIC_API_KEY=' >> /etc/environment\nfi\n"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "ConfigureCodeServer",
+      "inputs": {
+        "runCommand": [
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl nginx",
+          "#!/bin/bash",
+          "export HOME=/home/ubuntu",
+          "export PORT=3000",
+          "curl -fsSL https://code-server.dev/install.sh | sh",
+          "sudo systemctl enable --now code-server@ubuntu",
+          "sudo tee /etc/nginx/sites-available/code-server <<EOF\nserver {\n    listen 80;\n    listen [::]:80;\n    server_name example.cloudfront.net;\n    location / {\n      proxy_pass http://localhost:3000/;\n      proxy_set_header Host \\$host;\n      proxy_set_header Upgrade \\$http_upgrade;\n      proxy_set_header Connection upgrade;\n      proxy_set_header Accept-Encoding gzip;\n    }\n    location /api {\n      proxy_pass http://localhost:3001/api;\n      proxy_set_header Host \\$host;\n      proxy_set_header Upgrade \\$http_upgrade;\n      proxy_set_header Connection upgrade;\n      proxy_set_header Accept-Encoding gzip;\n    }\n}\nEOF\n",
+          "sudo tee /home/ubuntu/.config/code-server/config.yaml <<EOF\nbind-addr: 127.0.0.1:3000\ncert: false\nauth: password\nhashed-password: \"$(echo -n $(aws sts get-caller-identity --query \"Account\" --output text) | sudo npx argon2-cli -e)\"\nEOF\n",
+          "sudo -u ubuntu --login mkdir -p /home/ubuntu/.local/share/code-server/User/",
+          "sudo -u ubuntu --login touch /home/ubuntu/.local/share/code-server/User/settings.json",
+          "sudo tee /home/ubuntu/.local/share/code-server/User/settings.json <<EOF\n{\n  \"extensions.autoUpdate\": false,\n  \"extensions.autoCheckUpdates\": false,\n  \"terminal.integrated.cwd\": \"/home/ubuntu\",\n  \"telemetry.telemetryLevel\": \"off\",\n  \"security.workspace.trust.startupPrompt\": \"never\",\n  \"security.workspace.trust.enabled\": false,\n  \"security.workspace.trust.banner\": \"never\",\n  \"security.workspace.trust.emptyWindow\": false,\n  \"editor.indentSize\": \"tabSize\",\n  \"editor.tabSize\": 2,\n  \"python.testing.pytestEnabled\": true,\n  \"auto-run-command.rules\": [\n    {\n      \"command\": \"workbench.action.terminal.new\"\n    }\n  ]\n}\nEOF\n",
+          "sudo systemctl restart code-server@ubuntu",
+          "sudo ln -s ../sites-available/code-server /etc/nginx/sites-enabled/code-server",
+          "sudo systemctl restart nginx",
+          "sudo -u ubuntu --login code-server --install-extension AmazonWebServices.amazon-q-vscode --force",
+          "sudo -u ubuntu --login code-server --install-extension synedra.auto-run-command --force",
+          "sudo -u ubuntu --login code-server --install-extension vscjava.vscode-java-pack --force",
+          "sudo -u ubuntu --login code-server --install-extension ms-vscode.live-server --force",
+          "sudo chown ubuntu:ubuntu /home/ubuntu -R"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallClaudeCode",
+      "inputs": {
+        "runCommand": [
+          "#!/bin/bash",
+          "# Install Claude Code if Anthropic API key is provided\nif [ \"\" != \"\" ]; then\n  echo \"Installing Claude Code with remote context7 MCP server...\"\n  \n  # Install Claude Code CLI (verified package name)\n  npm install -g @anthropic-ai/claude-code\n  \n  # Ensure claude command is available\n  export PATH=\"$PATH:/usr/local/bin:$(npm config get prefix)/bin\"\n  \n  # Configure Claude Code as ubuntu user\n  sudo -u ubuntu bash << 'CLAUDE_SETUP'\n    export PATH=\"$PATH:/usr/local/bin:$(npm config get prefix)/bin\"\n    export ANTHROPIC_API_KEY=\"\"\n    \n    # Test installation\n    if ! command -v claude >/dev/null 2>&1; then\n      echo \"ERROR: Claude command not found after installation\"\n      exit 1\n    fi\n    \n    # Verify Claude can run (this will also handle initial setup)\n    echo \"Testing Claude installation...\"\n    timeout 10 claude --help || echo \"Claude help command completed\"\n    \n    # Note: MCP server configuration will be done interactively by user\n    echo \"Claude Code installed successfully\"\n    echo \"To add context7 MCP server, run: claude mcp add --transport sse context7 https://mcp.context7.com/sse\"\nCLAUDE_SETUP\n  \n  # Add Claude to PATH permanently\n  echo 'export PATH=\"$PATH:$(npm config get prefix)/bin\"' >> /home/ubuntu/.bashrc\n  \n  echo \"Claude Code installed successfully\"\n  echo \"Usage: Run 'claude' in terminal to start coding with AI assistance\"\n  echo \"To configure context7 MCP server, run the following as ubuntu user:\"\n  echo \"  claude mcp add --transport sse context7 https://mcp.context7.com/sse\"\nelse\n  echo \"Skipping Claude Code installation - no API key provided\"\nfi\n"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallCDK",
+      "inputs": {
+        "runCommand": [
+          "npm install -g aws-cdk",
+          "cdk --version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallGo",
+      "inputs": {
+        "runCommand": [
+          "add-apt-repository ppa:longsleep/golang-backports",
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go",
+          "sudo chown ubuntu:ubuntu /home/ubuntu -R",
+          "go version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallRust",
+      "inputs": {
+        "runCommand": [
+          "add-apt-repository ppa:ubuntu-mozilla-security/rust-next",
+          "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y rustc cargo",
+          "sudo chown ubuntu:ubuntu /home/ubuntu -R",
+          "rustc --version"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallDotnet",
+      "inputs": {
+        "runCommand": [
+          "apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y {{ dotNetVersion }}",
+          "sudo dotnet tool install -g Microsoft.Web.LibraryManager.Cli",
+          "export PATH=\"$PATH:/home/ubuntu/.dotnet/tools\"",
+          "sudo chown ubuntu:ubuntu /home/ubuntu -R",
+          "dotnet --list-sdks"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "InstallXDGUtils",
+      "inputs": {
+        "runCommand": [
+          "sudo apt install xdg-utils -y"
+        ]
+      }
+    },
+    {
+      "action": "aws:runShellScript",
+      "name": "DownloadIDPSetupScript",
+      "inputs": {
+        "timeoutSeconds": "7200",
+        "runCommand": [
+          "#!/bin/bash",
+          "cd /home/ubuntu\n\n# Configure git for the workshop\nsudo -u ubuntu git config --global user.email \"participant@workshops.aws\"\nsudo -u ubuntu git config --global user.name \"Workshop Participant\"\nsudo -u ubuntu git config --global init.defaultBranch \"main\"\ngit config --global --add safe.directory /home/ubuntu\ngit config --global user.email \"workshop@example.com\"\ngit config --global user.name \"WorkshopParticipant\"\n\n# Clone IDP repository\ngit clone https://github.com/shlapolosa/idp idp-setup\ncd idp-setup\ngit switch main\nchmod +x setup-karpenter-vclusters.sh\n\n# Create setup choice script\ncat > setup-choice.sh << 'EOF'\n#!/bin/bash\n\necho \"🚀 IDP Platform Setup Options\"\necho \"==============================\"\necho\necho \"Choose your setup method:\"\necho \"1) Original 3-cluster setup (legacy)\"\necho \"2) Cost-optimized Karpenter + vCluster setup (recommended)\"\necho \"3) Skip cluster setup (code-server only)\"\necho\nread -p \"Enter choice (1-3) [default: 2]: \" choice\nif [ -z \"$choice\" ]; then\n  choice=2\nfi\n\ncase $choice in\n    1)\n        echo \"Setting up original 3-cluster environment...\"\n        git clone https://github.com/aws-samples/appmod-blueprints\n        cd appmod-blueprints/platform/infra/terraform\n        chmod +x setup-environments.sh\n        ./setup-environments.sh\n        ;;\n    2)\n        echo \"Setting up Karpenter + vCluster environment...\"\n        ./setup-karpenter-vclusters.sh --cloud aws\n        ;;\n    3)\n        echo \"Skipping cluster setup - code-server only mode\"\n        ;;\n    *)\n        echo \"Invalid choice, defaulting to Karpenter + vCluster setup\"\n        ./setup-karpenter-vclusters.sh --cloud aws\n        ;;\nesac\nEOF\n\nchmod +x setup-choice.sh\n\n# Run the setup (auto-select Karpenter option for automated deployment)\necho \"2\" | ./setup-choice.sh\n\n# Download and setup kubeconfig manager\ncurl -fsSL https://raw.githubusercontent.com/shlapolosa/idp/main/kubeconfig-vault-manager.sh -o kubeconfig-vault-manager.sh\nchmod +x kubeconfig-vault-manager.sh\n./kubeconfig-vault-manager.sh setup\n\n# Set ownership\nsudo chown ubuntu:ubuntu /home/ubuntu -R\n"
+        ]
+      }
+    }
+  ]
+}

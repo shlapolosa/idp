@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "2.2",
+  "description": "Fix IAM configuration for EKS clusters with proper error handling",
+  "parameters": {
+    "region": {
+      "type": "String",
+      "description": "AWS Region",
+      "default": "us-east-1"
+    },
+    "accountId": {
+      "type": "String", 
+      "description": "AWS Account ID"
+    }
+  },
+  "mainSteps": [
+    {
+      "action": "aws:runShellScript",
+      "name": "ConfigureRolesAndAccessToCluster",
+      "inputs": {
+        "runCommand": [
+          "#!/bin/bash",
+          "export AWS_ACCOUNT=$(aws sts get-caller-identity --query 'Account' --output text)",
+          "# Check if any EKS clusters exist at all",
+          "clusters_found=0",
+          "",
+          "# Check if clusters exist before configuring IAM mappings",
+          "configure_iam_mapping() {",
+          "  local cluster_name=$1",
+          "  local role_arn=$2",
+          "  if aws eks describe-cluster --name $cluster_name --region={{region}} >/dev/null 2>&1; then",
+          "    echo \"✅ Configuring IAM mapping for cluster: $cluster_name, role: $role_arn\"",
+          "    if eksctl create iamidentitymapping --cluster $cluster_name --region={{region}} \\",
+          "      --arn $role_arn --username admin --group system:masters \\",
+          "      --no-duplicate-arns; then",
+          "      echo \"✅ Successfully created IAM mapping for $cluster_name\"",
+          "    else",
+          "      echo \"⚠️  Failed to create IAM mapping for $cluster_name with $role_arn (may already exist)\"",
+          "    fi",
+          "    clusters_found=$((clusters_found + 1))",
+          "  else",
+          "    echo \"ℹ️  Cluster $cluster_name does not exist, skipping IAM mapping\"",
+          "  fi",
+          "}",
+          "",
+          "echo \"🔧 Starting IAM role configuration for EKS clusters...\"",
+          "",
+          "# Configure IAM mappings for VSCodeInstanceRole",
+          "configure_iam_mapping \"modern-engineering\" \"arn:aws:iam::{{accountId}}:role/developer-env-VSCodeInstanceRole\"",
+          "configure_iam_mapping \"modernengg-dev\" \"arn:aws:iam::{{accountId}}:role/developer-env-VSCodeInstanceRole\"",
+          "configure_iam_mapping \"modernengg-prod\" \"arn:aws:iam::{{accountId}}:role/developer-env-VSCodeInstanceRole\"",
+          "",
+          "# Configure IAM mappings for WSOpsRole", 
+          "configure_iam_mapping \"modern-engineering\" \"arn:aws:iam::{{accountId}}:role/WSOpsRole\"",
+          "configure_iam_mapping \"modernengg-dev\" \"arn:aws:iam::{{accountId}}:role/WSOpsRole\"",
+          "configure_iam_mapping \"modernengg-prod\" \"arn:aws:iam::{{accountId}}:role/WSOpsRole\"",
+          "",
+          "# Configure IAM mappings for WSParticipantRole",
+          "configure_iam_mapping \"modern-engineering\" \"arn:aws:iam::{{accountId}}:role/WSParticipantRole\"", 
+          "configure_iam_mapping \"modernengg-dev\" \"arn:aws:iam::{{accountId}}:role/WSParticipantRole\"",
+          "configure_iam_mapping \"modernengg-prod\" \"arn:aws:iam::{{accountId}}:role/WSParticipantRole\"",
+          "",
+          "if [ $clusters_found -eq 0 ]; then",
+          "  echo \"ℹ️  No EKS clusters found. This is normal if cluster setup was skipped or if using vCluster-only setup.\"",
+          "  echo \"✅ IAM configuration completed (no clusters to configure)\"",
+          "else",
+          "  echo \"✅ IAM configuration completed for $clusters_found cluster(s)\"",
+          "fi"
+        ]
+      }
+    }
+  ]
+}

@@ -9,7 +9,7 @@ set -e  # Exit on any error
 # Configuration
 STACK_NAME="modern-engineering-workshop"
 TEMPLATE_FILE="modern-engineering-workshop.yaml"
-REGION="us-west-2"
+REGION="us-east-1"
 DRY_RUN=false
 
 # Colors for output
@@ -167,11 +167,11 @@ create_s3_bucket() {
     BUCKET_SUFFIX=$(uuidgen | tr -d - | tr '[:upper:]' '[:lower:]' | cut -c1-8)
     BUCKET_NAME="cf-templates-${BUCKET_SUFFIX}-${REGION}"
     
-    print_status "Creating S3 bucket: $BUCKET_NAME"
+    print_status "Creating S3 bucket: $BUCKET_NAME" >&2
     
     # Check if bucket already exists
     if aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
-        print_warning "Bucket $BUCKET_NAME already exists, using it"
+        print_warning "Bucket $BUCKET_NAME already exists, using it" >&2
     else
         # Create bucket
         if [ "$REGION" = "us-east-1" ]; then
@@ -191,7 +191,7 @@ create_s3_bucket() {
             --bucket "$BUCKET_NAME" \
             --versioning-configuration Status=Enabled > /dev/null
             
-        print_success "Created S3 bucket: $BUCKET_NAME"
+        print_success "Created S3 bucket: $BUCKET_NAME" >&2
     fi
     
     echo "$BUCKET_NAME"
@@ -308,16 +308,11 @@ deploy_stack() {
     
     # Prepare parameter overrides securely
     local parameter_overrides="AtAnAWSEvent=false"
-    local param_file=""
     
     # Add Anthropic API key if present in environment
     if [[ -n "$ANTHROPIC_API_KEY" ]]; then
         print_status "Found ANTHROPIC_API_KEY environment variable, including in deployment"
-        # Create temporary parameter file to avoid exposing API key in command line
-        param_file=$(mktemp)
-        echo "AtAnAWSEvent=false" > "$param_file"
-        echo "AnthropicApiKey=$ANTHROPIC_API_KEY" >> "$param_file"
-        parameter_overrides="file://$param_file"
+        parameter_overrides="AtAnAWSEvent=false AnthropicApiKey=$ANTHROPIC_API_KEY"
     else
         print_warning "ANTHROPIC_API_KEY not found in environment. Claude Code will not be configured."
         print_status "To enable Claude Code, set ANTHROPIC_API_KEY environment variable and redeploy."
@@ -360,9 +355,41 @@ deploy_stack() {
         return 1
     fi
     
-    # Clean up temporary parameter file
-    if [[ -n "$param_file" && -f "$param_file" ]]; then
-        rm -f "$param_file"
+}
+
+# Function to handle Lambda@Edge deletion
+cleanup_lambda_edge() {
+    print_status "Checking for Lambda@Edge functions..."
+    
+    # Get Lambda@Edge functions from the stack
+    local lambda_edge_functions
+    lambda_edge_functions=$(aws cloudformation describe-stack-resources \
+        --stack-name "$STACK_NAME" \
+        --region "$REGION" \
+        --query 'StackResources[?ResourceType==`AWS::Lambda::Function`].PhysicalResourceId' \
+        --output text 2>/dev/null)
+    
+    if [[ -n "$lambda_edge_functions" ]]; then
+        for function_arn in $lambda_edge_functions; do
+            # Check if function is Lambda@Edge (has replicas)
+            local replicated_regions
+            replicated_regions=$(aws lambda get-function \
+                --function-name "$function_arn" \
+                --region "$REGION" \
+                --query 'Configuration.MasterArn' \
+                --output text 2>/dev/null)
+            
+            if [[ "$replicated_regions" != "None" && "$replicated_regions" != "null" ]]; then
+                print_warning "Lambda@Edge function detected: $function_arn"
+                print_status "Lambda@Edge functions require manual cleanup:"
+                echo "1. Remove CloudFront associations"
+                echo "2. Wait for edge replicas to be removed (may take hours)"
+                echo "3. Delete the function manually"
+                echo
+                print_status "To delete manually later:"
+                echo "aws lambda delete-function --function-name $function_arn --region $REGION"
+            fi
+        done
     fi
 }
 
@@ -379,6 +406,8 @@ cleanup() {
         echo "📞 Support:"
         echo "• View logs: aws cloudformation describe-stack-events --stack-name $STACK_NAME"
         echo "• Delete failed stack: aws cloudformation delete-stack --stack-name $STACK_NAME"
+        echo
+        cleanup_lambda_edge
     fi
 }
 
