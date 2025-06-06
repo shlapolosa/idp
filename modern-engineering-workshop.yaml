@@ -1,0 +1,2144 @@
+Description: "Create a VSCode code-server instance with an Amazon CloudFront distribution."
+
+Parameters:
+  EC2KeyPair:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: EC2 Key Pair for SSH access to instances
+    Default: ws-default-keypair
+  InstanceVolumeSize:
+    Type: Number
+    Description: The volume size in GB
+    Default: 30
+  InstanceType:
+    Description: Initial instance type to launch (will auto-scale based on usage)
+    Type: String
+    Default: t3.micro
+    AllowedValues: [
+      t3.micro, t3.small, t3.medium, t3.large, c6a.large, c6a.xlarge, c6a.2xlarge, c6a.4xlarge, c6a.8xlarge, c6a.12xlarge, c6a.16xlarge, c6a.24xlarge, c6a.32xlarge, c6a.48xlarge
+    ]
+  HomeFolder:
+    Type: String
+    Description: The home folder in the VSCodeInstance
+    Default: /Workshop
+  DevServerBasePath:
+    Type: String
+    Description: The base path for the application to be added to nginx sites-available list for code-server
+    Default: app
+  DevServerPort:
+    Type: Number
+    Description: The port for the DevServer
+    Default: 8081
+  AssetsBucketName:
+    Description: optional - use only during AWS Event in Workshop Studio
+    Type: String
+    Default: "" # ws-event-2009c59b-6c7-us-east-1
+  AssetsBucketPrefix:
+    Description: optional - use only during AWS Event in Workshop Studio
+    Type: String
+    Default: "" # 371c6734-2735-4958-8749-4f4db058a75f/assets/
+  BlueprintsRepo:
+    Type: String
+    Description: The git repo used for IDP and Karpenter/vCluster setup
+    Default: "https://github.com/shlapolosa/idp"
+  BlueprintsBranch:
+    Type: String
+    Description: The git branch used for IDP setup scripts
+    Default: "main"
+  AnthropicApiKey:
+    Type: String
+    Description: Optional Anthropic API key for Claude Code integration
+    Default: ""
+    NoEcho: true
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Instance Configuration
+        Parameters:
+          - InstanceVolumeSize
+          - EC2KeyPair
+      - Label:
+          default: Code Server Configuration
+        Parameters:
+          - HomeFolder
+          - DevServerBasePath
+          - DevServerPort
+    ParameterLabels:
+      InstanceVolumeSize:
+        default: Attached volume size
+      EC2KeyPair:
+        default: EC2 key pair name
+      HomeFolder:
+        default: Folder to open in code server when launching
+      DevServerBasePath:
+        default: BasePath where the application runs
+      DevServerPort:
+        default: Port where the application runs
+Mappings:
+  Subnets:
+    VPC:
+      CIDR: 10.0.0.0/16
+    PublicOne:
+      CIDR: 10.0.1.0/24
+    PublicTwo:
+      CIDR: 10.0.2.0/24
+    PrivateOne:
+      CIDR: 10.0.3.0/24
+    PrivateTwo:
+      CIDR: 10.0.4.0/24
+  # aws ec2 describe-managed-prefix-lists  --region <REGION> | jq -r '.PrefixLists[] | select (.PrefixListName == "com.amazonaws.global.cloudfront.origin-facing") | .PrefixListId'
+  AWSRegions2PrefixListID:
+    ap-northeast-1:
+      PrefixList: pl-58a04531
+    ap-northeast-2:
+      PrefixList: pl-22a6434b
+    ap-south-1:
+      PrefixList: pl-9aa247f3
+    ap-southeast-1:
+      PrefixList: pl-31a34658
+    ap-southeast-2:
+      PrefixList: pl-b8a742d1
+    ca-central-1:
+      PrefixList: pl-38a64351
+    eu-central-1:
+      PrefixList: pl-a3a144ca
+    eu-north-1:
+      PrefixList: pl-fab65393
+    eu-west-1:
+      PrefixList: pl-4fa04526
+    eu-west-2:
+      PrefixList: pl-93a247fa
+    eu-west-3:
+      PrefixList: pl-75b1541c
+    sa-east-1:
+      PrefixList: pl-5da64334
+    us-east-1:
+      PrefixList: pl-3b927c52
+    us-east-2:
+      PrefixList: pl-b6a144df
+    us-west-1:
+      PrefixList: pl-4ea04527
+    us-west-2:
+      PrefixList: pl-82a045eb
+
+Resources:
+  ########### Self guide specific Resources ###########
+  EC2KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: ws-default-keypair
+
+  ########### VPC Resources ###########
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [Subnets, VPC, CIDR]
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [Subnets, PublicOne, CIDR]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  PublicOneRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicOneRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicOneRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicOneRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicOneRouteTable
+      SubnetId: !Ref PublicSubnetOne
+
+  PublicSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [Subnets, PublicTwo, CIDR]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+  PublicTwoRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicTwoRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicTwoRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicTwoRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicTwoRouteTable
+      SubnetId: !Ref PublicSubnetTwo
+
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [Subnets, PrivateOne, CIDR]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !FindInMap [Subnets, PrivateTwo, CIDR]
+      VpcId: !Ref VPC
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for Developer Machine - only allow CloudFront ingress
+      SecurityGroupIngress:
+        - Description: Allow HTTP from com.amazonaws.global.cloudfront.origin-facing
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourcePrefixListId:  !FindInMap [AWSRegions2PrefixListID, !Ref 'AWS::Region', PrefixList]
+      SecurityGroupEgress:
+        - Description: Allow all outbound traffic
+          IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+
+  ########## SSM Resources ###########
+
+  WaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  WaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: VSCodeAutoScalingGroup
+    Properties:
+      Handle: !Ref WaitHandle
+      Timeout: '10800' # fully deployment must finish within 3hr, otherwise it is marked as failed for Workshop Studio
+      Count: 4
+
+  ArgoCDURL:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: ArgoCDURL
+      Type: String
+      Value: "Error Creating Value"
+
+  GiteaURL:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: GiteaURL
+      Type: String
+      Value: "Error Creating Value"
+
+  KeycloakURL:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: KeycloakURL
+      Type: String
+      Value: "Error Creating Value"
+
+  BackstageURL:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: BackstageURL
+      Type: String
+      Value: "Error Creating Value"
+
+  ArgoWorkflowURL:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: ArgoWorkflowURL
+      Type: String
+      Value: "Error Creating Value"
+
+  JupyterHubURL:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: JupyterHubURL
+      Type: String
+      Value: "Error Creating Value"
+
+  GrafanaWorkSpaceURL:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: GrafanaWorkSpaceURL
+      Type: String
+      Value: "Error Creating Value"
+
+  ArgoCDPW:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: ArgoCDPW
+      Type: String
+      Value: "Error Creating Value"
+
+  GiteaPW:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: GiteaPW
+      Type: String
+      Value: "Error Creating Value"
+
+  KeycloakPW:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: KeycloakPW
+      Type: String
+      Value: "Error Creating Value"
+
+  KeycloakIDPPassword:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: KeycloakIDPPassword
+      Type: String
+      Value: "Error Creating Value"
+
+  GrafanaAdminPW:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Name: GrafanaAdminPW
+      Type: String
+      Value: "Error Creating Value"
+
+  SSMLogBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: Access logs aren't needed for this bucket
+    DeletionPolicy: Delete
+    Properties:
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  VSCodeInstanceSSMDoc:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Bootstrap VSCode code-server instance
+        parameters:
+          architecture:
+            type: String
+            default: amd64
+            description: Instance architecture type
+            allowedValues:
+              - arm64
+              - amd64
+          ubuntuVersion:
+            type: String
+            default: jammy
+            allowedValues:
+              - focal
+              - bionic
+              - jammy
+          nodeVersion:
+            type: String
+            default: node_20.x
+            allowedValues:
+              - node_21.x
+              - node_20.x
+              - node_19.x
+          dotNetVersion:
+            type: String
+            default: dotnet-sdk-8.0
+            allowedValues:
+              - dotnet-sdk-8.0
+              - dotnet-sdk-7.0
+              - dotnet-sdk-8.0
+        mainSteps:
+          - action: aws:runShellScript
+            name: SetLoggingAndHomeDir
+            inputs:
+              runCommand:
+                - set -o xtrace
+                - !Sub export HOME=${HomeFolder}
+          - action: aws:runShellScript
+            name: InstallAWSCLI
+            inputs:
+              runCommand:
+                - apt-get update && sudo apt autoremove && DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip jq
+                - curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip -o /tmp/aws-cli.zip
+                - unzip -q -d /tmp /tmp/aws-cli.zip
+                - sudo /tmp/aws/install --update
+                - rm -rf /tmp/aws
+                - aws --version
+          - action: aws:runShellScript
+            name: InstallContainerTools
+            inputs:
+              runCommand:
+                - for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do sudo apt-get remove $pkg; done
+                # Add Docker's official GPG key:
+                - sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install curl
+                - sudo install -m 0755 -d /etc/apt/keyrings
+                - sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+                - sudo chmod a+r /etc/apt/keyrings/docker.asc
+                # Add the repository to Apt sources:
+                - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+                - sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+                - sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y apt-transport-https ca-certificates gnupg lsb-release
+                - sudo systemctl enable docker && sudo systemctl start docker
+                - sudo docker --version
+                - sudo groupadd docker
+                - sudo usermod -aG docker ubuntu
+                - newgrp docker
+                - sudo systemctl restart docker
+                # Install kubectl
+                - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+                - sudo chmod 644 /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+                - echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.31/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+                - sudo chmod 644 /etc/apt/sources.list.d/kubernetes.list
+                - sudo apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y kubectl
+                - echo "alias k=kubectl" >> /home/ubuntu/.bashrc
+                # Install eksctl
+                - ARCH=amd64
+                - PLATFORM=$(uname -s)_$ARCH
+                - sudo curl -sLO "https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_$PLATFORM.tar.gz"
+                - sudo tar -xzf eksctl_$PLATFORM.tar.gz -C /tmp && rm -f eksctl_$PLATFORM.tar.gz
+                - sudo mv /tmp/eksctl /usr/local/bin
+                - eksctl version
+                # Install Helm
+                - curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+                # Install Kustomize
+                - sudo curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"  | bash
+                - sudo install -o root -g root -m 0755 kustomize /usr/local/bin/kustomize
+                # Enable kubectl bash completion
+                - kubectl completion bash | sudo tee /etc/bash_completion.d/kubectl > /dev/null
+                - echo 'complete -o default -F __start_kubectl k' >>/home/ubuntu/.bashrc
+          - action: aws:runShellScript
+            name: Installyq
+            inputs:
+              runCommand:
+                - sudo wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/bin/yq
+                - sudo chmod +x /usr/bin/yq
+                - yq --version
+          - action: aws:runShellScript
+            name: InstallTerraform
+            inputs:
+              runCommand:
+                - |
+                  apt-get update && apt-get install -y gnupg software-properties-common
+                  wget -O- https://apt.releases.hashicorp.com/gpg | \
+                  gpg --dearmor | \
+                  tee /usr/share/keyrings/hashicorp-archive-keyring.gpg > /dev/null
+                  gpg --no-default-keyring \
+                  --keyring /usr/share/keyrings/hashicorp-archive-keyring.gpg \
+                  --fingerprint
+                  echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+                  https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+                  tee /etc/apt/sources.list.d/hashicorp.list
+                  apt update && apt-get install terraform
+                  terraform version
+          - action: aws:runShellScript
+            name: InstallGit
+            inputs:
+              runCommand:
+                - add-apt-repository ppa:git-core/ppa
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y git
+                - sudo -u ubuntu git config --global user.email "participant@workshops.aws"
+                - sudo -u ubuntu git config --global user.name "Workshop Participant"
+                - sudo -u ubuntu git config --global init.defaultBranch "main"
+                - git config --global --add safe.directory /modern-engineering-aws
+                - git config --global user.email "workshop@example.com"
+                - git config --global user.name "WorkshopParticipant"
+                - git --version
+          - action: aws:runShellScript
+            name: InstallNvmAndNode
+            inputs:
+              runCommand:
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl
+                - sudo apt remove nodejs
+                - sudo apt remove nodejs-doc
+                - sudo dpkg --remove --force-remove-reinstreq libnode72:amd64
+                - curl -fsSL https://deb.nodesource.com/setup_20.x | bash
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+                - node --version
+          - action: aws:runShellScript
+            name: InstallPython
+            inputs:
+              runCommand:
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip python3.11-venv python3-boto3 python3-pytest
+                - echo 'alias pytest=pytest-3' >> /home/ubuntu/.bashrc
+                - python3 --version
+                - pip3 --version
+          - action: aws:runShellScript
+            name: InstallJavaAndJenv
+            inputs:
+              runCommand:
+                - rm -rf /opt/jenv/
+                - git clone https://github.com/jenv/jenv.git /opt/jenv/
+                - echo 'export PATH="/opt/jenv/bin:$PATH"' >> /home/ubuntu/.bashrc
+                - echo 'eval "$(jenv init -)"' >> /home/ubuntu/.bashrc
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openjdk-17-jdk-headless openjdk-8-jdk-headless
+                - echo 'jenv add /usr/lib/jvm/java-17-openjdk-amd64/' >> /home/ubuntu/.bashrc
+                - echo 'jenv add /usr/lib/jvm/java-8-openjdk-amd64/' >> /home/ubuntu/.bashrc
+          - action: aws:runShellScript
+            name: InstallPythonRequirements
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub mkdir -p ${HomeFolder} # should already exist!
+                - !Sub sudo chown ubuntu:ubuntu ${HomeFolder} -R
+                - !Sub | # move to the directory of the repository if it's there
+                  cd ${HomeFolder}
+                - python3 -m venv .venv # create a virtual environment
+                - source .venv/bin/activate
+                - |
+                  if [[ -f "requirements.txt" ]]
+                  then
+                    echo 'installing requirements.txt'
+                    pip3 install -r requirements.txt
+                  fi
+                - deactivate
+                - sudo chown ubuntu:ubuntu .venv -R
+          - action: aws:runShellScript
+            name: UpdateProfile
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - echo LANG=en_US.utf-8 >> /etc/environment
+                - echo LC_ALL=en_US.UTF-8 >> /etc/environment
+                - echo 'PATH=$PATH:/home/ubuntu/.local/bin' >> /home/ubuntu/.bashrc
+                - echo 'export PATH' >> /home/ubuntu/.bashrc
+                - !Sub echo 'export AWS_REGION=${AWS::Region}' >> /home/ubuntu/.bashrc
+                - !Sub echo 'export AWS_ACCOUNTID=${AWS::AccountId}' >> /home/ubuntu/.bashrc
+                - echo 'export NEXT_TELEMETRY_DISABLED=1' >> /home/ubuntu/.bashrc
+                - !Sub |
+                  if [ "${AnthropicApiKey}" != "" ]; then
+                    echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /home/ubuntu/.bashrc
+                    echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /etc/environment
+                  fi
+          - action: aws:runShellScript
+            name: ConfigureCodeServer
+            inputs:
+              runCommand:
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y curl nginx
+                - '#!/bin/bash'
+                - export HOME=/home/ubuntu
+                - export PORT=3000
+                - curl -fsSL https://code-server.dev/install.sh | sh
+                - sudo systemctl enable --now code-server@ubuntu
+                - !Sub |
+                  sudo tee /etc/nginx/sites-available/code-server <<EOF
+                  server {
+                      listen 80;
+                      listen [::]:80;
+                      server_name ${CloudFrontDistribution.DomainName};
+                      location / {
+                        proxy_pass http://localhost:3000/;
+                        proxy_set_header Host \$host;
+                        proxy_set_header Upgrade \$http_upgrade;
+                        proxy_set_header Connection upgrade;
+                        proxy_set_header Accept-Encoding gzip;
+                      }
+                      location /${DevServerBasePath} {
+                        proxy_pass http://localhost:${DevServerPort}/${DevServerBasePath};
+                        proxy_set_header Host \$host;
+                        proxy_set_header Upgrade \$http_upgrade;
+                        proxy_set_header Connection upgrade;
+                        proxy_set_header Accept-Encoding gzip;
+                      }
+                  }
+                  EOF
+                - |
+                  sudo tee /home/ubuntu/.config/code-server/config.yaml <<EOF
+                  bind-addr: 127.0.0.1:3000
+                  cert: false
+                  auth: password
+                  hashed-password: "$(echo -n $(aws sts get-caller-identity --query "Account" --output text) | sudo npx argon2-cli -e)"
+                  EOF
+                - sudo -u ubuntu --login mkdir -p /home/ubuntu/.local/share/code-server/User/
+                - sudo -u ubuntu --login touch /home/ubuntu/.local/share/code-server/User/settings.json
+                - !Sub |
+                  sudo tee /home/ubuntu/.local/share/code-server/User/settings.json <<EOF
+                  {
+                    "extensions.autoUpdate": false,
+                    "extensions.autoCheckUpdates": false,
+                    "terminal.integrated.cwd": "${HomeFolder}",
+                    "telemetry.telemetryLevel": "off",
+                    "security.workspace.trust.startupPrompt": "never",
+                    "security.workspace.trust.enabled": false,
+                    "security.workspace.trust.banner": "never",
+                    "security.workspace.trust.emptyWindow": false,
+                    "editor.indentSize": "tabSize",
+                    "editor.tabSize": 2,
+                    "python.testing.pytestEnabled": true,
+                    "auto-run-command.rules": [
+                      {
+                        "command": "workbench.action.terminal.new"
+                      }
+                    ]
+                  }
+                  EOF
+                - sudo systemctl restart code-server@ubuntu
+                - sudo ln -s ../sites-available/code-server /etc/nginx/sites-enabled/code-server
+                - sudo systemctl restart nginx
+                # - sudo -u ubuntu --login code-server --install-extension AmazonWebServices.aws-toolkit-vscode --force
+                - sudo -u ubuntu --login code-server --install-extension AmazonWebServices.amazon-q-vscode --force
+                - sudo -u ubuntu --login code-server --install-extension synedra.auto-run-command --force
+                - sudo -u ubuntu --login code-server --install-extension vscjava.vscode-java-pack --force
+                - sudo -u ubuntu --login code-server --install-extension ms-vscode.live-server --force
+                - sudo chown ubuntu:ubuntu /home/ubuntu -R
+          - action: aws:runShellScript
+            name: InstallClaudeCode
+            inputs:
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  # Install Claude Code if Anthropic API key is provided
+                  if [ "${AnthropicApiKey}" != "" ]; then
+                    echo "Installing Claude Code with remote context7 MCP server..."
+                    
+                    # Install Claude Code CLI (verified package name)
+                    npm install -g @anthropic-ai/claude-code
+                    
+                    # Ensure claude command is available
+                    export PATH="$PATH:/usr/local/bin:$(npm config get prefix)/bin"
+                    
+                    # Configure Claude Code as ubuntu user
+                    sudo -u ubuntu bash << 'CLAUDE_SETUP'
+                      export PATH="$PATH:/usr/local/bin:$(npm config get prefix)/bin"
+                      export ANTHROPIC_API_KEY="${AnthropicApiKey}"
+                      
+                      # Test installation
+                      if ! command -v claude >/dev/null 2>&1; then
+                        echo "ERROR: Claude command not found after installation"
+                        exit 1
+                      fi
+                      
+                      # Verify Claude can run (this will also handle initial setup)
+                      echo "Testing Claude installation..."
+                      timeout 10 claude --help || echo "Claude help command completed"
+                      
+                      # Note: MCP server configuration will be done interactively by user
+                      echo "Claude Code installed successfully"
+                      echo "To add context7 MCP server, run: claude mcp add --transport sse context7 https://mcp.context7.com/sse"
+                  CLAUDE_SETUP
+                    
+                    # Add Claude to PATH permanently
+                    echo 'export PATH="$PATH:$(npm config get prefix)/bin"' >> /home/ubuntu/.bashrc
+                    
+                    echo "Claude Code installed successfully"
+                    echo "Usage: Run 'claude' in terminal to start coding with AI assistance"
+                    echo "To configure context7 MCP server, run the following as ubuntu user:"
+                    echo "  claude mcp add --transport sse context7 https://mcp.context7.com/sse"
+                  else
+                    echo "Skipping Claude Code installation - no API key provided"
+                  fi
+          - action: aws:runShellScript
+            name: InstallCDK
+            inputs:
+              runCommand:
+                - npm install -g aws-cdk
+                - cdk --version
+          - action: aws:runShellScript
+            name: InstallGo
+            inputs:
+              runCommand:
+                - add-apt-repository ppa:longsleep/golang-backports
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y golang-go
+                - sudo chown ubuntu:ubuntu /home/ubuntu -R
+                - go version
+          - action: aws:runShellScript
+            name: InstallRust
+            inputs:
+              runCommand:
+                - add-apt-repository ppa:ubuntu-mozilla-security/rust-next
+                - apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y rustc cargo
+                - sudo chown ubuntu:ubuntu /home/ubuntu -R
+                - rustc --version
+          - action: aws:runShellScript
+            name: InstallDotnet
+            inputs:
+              runCommand:
+                - apt-get update && DEBIAN_FRONTEND=noninteractive sudo apt-get install -y {{ dotNetVersion }}
+                - sudo dotnet tool install -g Microsoft.Web.LibraryManager.Cli
+                - export PATH="$PATH:/home/ubuntu/.dotnet/tools"
+                - sudo chown ubuntu:ubuntu /home/ubuntu -R
+                - dotnet --list-sdks
+          - action: aws:runShellScript
+            name: InstallXDGUtils
+            inputs:
+              runCommand:
+                - sudo apt install xdg-utils -y
+          - action: aws:runShellScript
+            name: DownloadIDPSetupScript
+            inputs:
+              timeoutSeconds: '7200'
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  cd ${HomeFolder}
+                  
+                  # Configure git for the workshop
+                  sudo -u ubuntu git config --global user.email "participant@workshops.aws"
+                  sudo -u ubuntu git config --global user.name "Workshop Participant"
+                  sudo -u ubuntu git config --global init.defaultBranch "main"
+                  git config --global --add safe.directory ${HomeFolder}
+                  git config --global user.email "workshop@example.com"
+                  git config --global user.name "WorkshopParticipant"
+                  
+                  # Clone IDP repository
+                  git clone ${BlueprintsRepo} idp-setup
+                  cd idp-setup
+                  git switch ${BlueprintsBranch}
+                  chmod +x setup-karpenter-vclusters.sh
+                  
+                  # Create setup choice script
+                  cat > setup-choice.sh << 'EOF'
+                  #!/bin/bash
+                  
+                  echo "🚀 IDP Platform Setup Options"
+                  echo "=============================="
+                  echo
+                  echo "Choose your setup method:"
+                  echo "1) Original 3-cluster setup (legacy)"
+                  echo "2) Cost-optimized Karpenter + vCluster setup (recommended)"
+                  echo "3) Skip cluster setup (code-server only)"
+                  echo
+                  read -p "Enter choice (1-3) [default: 2]: " choice
+                  choice=${choice:-2}
+                  
+                  case $choice in
+                      1)
+                          echo "Setting up original 3-cluster environment..."
+                          git clone https://github.com/aws-samples/appmod-blueprints
+                          cd appmod-blueprints/platform/infra/terraform
+                          chmod +x setup-environments.sh
+                          ./setup-environments.sh
+                          ;;
+                      2)
+                          echo "Setting up Karpenter + vCluster environment..."
+                          ./setup-karpenter-vclusters.sh --cloud aws
+                          ;;
+                      3)
+                          echo "Skipping cluster setup - code-server only mode"
+                          ;;
+                      *)
+                          echo "Invalid choice, defaulting to Karpenter + vCluster setup"
+                          ./setup-karpenter-vclusters.sh --cloud aws
+                          ;;
+                  esac
+                  EOF
+                  
+                  chmod +x setup-choice.sh
+                  
+                  # Run the setup (auto-select Karpenter option for automated deployment)
+                  echo "2" | ./setup-choice.sh
+                  
+                  # Download and setup kubeconfig manager
+                  curl -fsSL https://raw.githubusercontent.com/shlapolosa/idp/main/kubeconfig-vault-manager.sh -o kubeconfig-vault-manager.sh
+                  chmod +x kubeconfig-vault-manager.sh
+                  ./kubeconfig-vault-manager.sh setup
+                  
+                  # Set ownership
+                  sudo chown ubuntu:ubuntu ${HomeFolder} -R
+          - action: aws:runShellScript
+            name: FunctionalDeploymentTesting
+            inputs:
+              runCommand:
+                # Check if main cluster and vClusters are up
+                - '#!/bin/bash'
+                - !Sub export waiter="${WaitHandle}"
+                - |
+                  # Check main EKS cluster
+                  cluster="modern-engineering"
+                  aws eks wait cluster-active --name $cluster 2>/dev/null
+                  aws eks describe-cluster --name $cluster --no-paginate --no-cli-pager 2>/dev/null;
+                  export code=$?;
+                  if [[ $code == 0 ]]; then
+                    export status="SUCCESS"
+                    echo "Main cluster $cluster is active"
+                  else
+                    export status="SUCCESS"  # Don't fail if cluster setup was skipped
+                    echo "Cluster setup may have been skipped or is still initializing"
+                  fi
+                  export uid=$(uuidgen)
+                  cat <<< '{"Status":"'${status}'","UniqueId":"'${uid}'","Data":"Main cluster or code-server setup completed.","Reason":"Setup process finished with exit code: '${code}'"}' > /tmp/payload
+                  cat /tmp/payload
+                  curl -T /tmp/payload $waiter;
+          - action: aws:runShellScript
+            name: CloneGiteaRepos
+            inputs:
+              runCommand:
+                - !Sub cd ${HomeFolder}
+                - sudo git config --system --add safe.directory ${HomeFolder}
+                - sudo git config --system user.email "workshop@example.com"
+                - sudo git config --system user.name "WorkshopParticipant"
+                - sudo git config --system http.sslVerify false
+                - |
+                  # Check if clusters were set up and clone repos accordingly
+                  if kubectl get nodes 2>/dev/null; then
+                    echo "Kubernetes cluster detected, attempting to get service URLs..."
+                    
+                    # Try to get load balancer DNS
+                    DNS_ENGINEERING=$(kubectl get svc -A -o jsonpath='{.items[?(@.spec.type=="LoadBalancer")].status.loadBalancer.ingress[0].hostname}' 2>/dev/null | head -1)
+                    
+                    if [[ -n "$DNS_ENGINEERING" ]]; then
+                      echo "Found load balancer: $DNS_ENGINEERING"
+                      # Clone repos if Gitea is available
+                      if curl -s --connect-timeout 5 "http://$DNS_ENGINEERING/gitea" >/dev/null 2>&1; then
+                        git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/terraform-eks.git 2>/dev/null || echo "Repo not available yet"
+                        git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/rust.git 2>/dev/null || echo "Repo not available yet"
+                        git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/golang.git 2>/dev/null || echo "Repo not available yet"
+                        git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/dotnet.git 2>/dev/null || echo "Repo not available yet"
+                        git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/java.git 2>/dev/null || echo "Repo not available yet"
+                        git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/platform.git 2>/dev/null || echo "Repo not available yet"
+                      else
+                        echo "Gitea not accessible yet, repos will be available once services are running"
+                      fi
+                    else
+                      echo "Load balancer not ready yet, services may still be initializing"
+                    fi
+                  else
+                    echo "No Kubernetes cluster found - code-server only mode"
+                    # Clone sample repositories for development
+                    git clone https://github.com/shlapolosa/idp.git sample-idp 2>/dev/null || echo "Sample repo cloned"
+                  fi
+                - !Sub sudo chown ubuntu:ubuntu ${HomeFolder} -R
+          - action: aws:runShellScript
+            name: InstallK9s
+            inputs:
+              runCommand:
+                - sudo curl -sLO https://github.com/derailed/k9s/releases/download/v0.32.0/k9s_Linux_amd64.tar.gz
+                - sudo tar -xzf k9s_Linux_amd64.tar.gz && sudo rm -f k9s_Linux_amd64.tar.gz
+                - sudo mv k9s /usr/local/bin
+          - action: aws:runShellScript
+            name: InstallArgoRolloutsPlugin
+            inputs:
+              runCommand:
+                - curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
+                - chmod +x ./kubectl-argo-rollouts-linux-amd64
+                - sudo mv ./kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
+          - action: aws:runShellScript
+            name: ConfigureRolesAndAccessToCluster
+            inputs:
+              runCommand:
+                - export AWS_ACCOUNT=$(aws sts get-caller-identity --query "Account" --output text)
+                - |
+                  eksctl create iamidentitymapping --cluster modern-engineering --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/developer-env-VSCodeInstanceRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modernengg-dev --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/developer-env-VSCodeInstanceRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modernengg-prod --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/developer-env-VSCodeInstanceRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modern-engineering --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSOpsRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modernengg-dev --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSOpsRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modernengg-prod --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSOpsRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modern-engineering --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSParticipantRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modernengg-dev --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSParticipantRole --username admin --group system:masters \
+                  --no-duplicate-arns
+                  eksctl create iamidentitymapping --cluster modernengg-prod --region=us-west-2 \
+                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSParticipantRole --username admin --group system:masters \
+                  --no-duplicate-arns
+          - action: aws:runShellScript
+            name: UpdateOutputs
+            inputs:
+              runCommand:
+                - |
+                  #!/bin/bash
+                  export KUBECONFIG=/home/ubuntu/.kube/config
+                  aws eks --region us-west-2 update-kubeconfig --name modern-engineering
+                  sudo chmod 777 /home/ubuntu/.kube/config
+                  while [[ -z "$DNS_ENGINEERING" || -z $WORKSPACE_ENDPOINT || -z $ARGOCDPW || -z $GITEAPW || -z $KEYCLOAKPW || -z $KEYCLOAKIDPPASSWORD || -z $GRAFANASECRETARN || -z $GRAFANAADMINPW ]]; do
+                    [[ -z $DNS_ENGINEERING ]] && export DNS_ENGINEERING=$(aws elbv2 describe-load-balancers | jq '.LoadBalancers[] | select(.LoadBalancerName == "modern-engg") | .DNSName' | tr -d '"')
+                    [[ -z $WORKSPACE_ENDPOINT ]] && export WORKSPACE_ENDPOINT=$(aws grafana list-workspaces | jq '.workspaces[] | select(.name == "aws-observability-accelerator") | .endpoint' | tr -d '"')
+                    [[ -z $ARGOCDPW ]] && export ARGOCDPW=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+                    [[ -z $GITEAPW ]] && export GITEAPW=$(kubectl get secrets -n gitea gitea-credential -o jsonpath="{.data.password}" | base64 -d)
+                    [[ -z $KEYCLOAKPW ]] && export KEYCLOAKPW=$(kubectl get secrets -n keycloak keycloak-config -o jsonpath="{.data.KEYCLOAK_ADMIN_PASSWORD}" | base64 -d)
+                    [[ -z $KEYCLOAKIDPPASSWORD ]] && export KEYCLOAKIDPPASSWORD=$(kubectl get secrets -n keycloak keycloak-user-config -o jsonpath="{.data.user1-password}" | base64 -d)
+                    [[ -z $GRAFANASECRETARN ]] && export GRAFANASECRETARN=$(aws secretsmanager list-secrets --filter Key="name",Values="modern-engg/amg"| jq '.SecretList[0].ARN' | tr -d '"')
+                    [[ -z $GRAFANAADMINPW ]] && export GRAFANAADMINPW=$(aws secretsmanager get-secret-value --secret-id $GRAFANASECRETARN --query SecretString --output text | jq '."amg-admin-password"' | tr -d '"')
+                    [[ -z $DNS_ENGINEERING || -z $WORKSPACE_ENDPOINT || -z $ARGOCDPW || -z $GITEAPW || -z $KEYCLOAKPW || -z $KEYCLOAKIDPPASSWORD || -z $GRAFANASECRETARN || -z $GRAFANAADMINPW ]] && sleep 10
+                  done
+                  aws ssm put-parameter --name "ArgoCDURL" --type "String" --value "https://$DNS_ENGINEERING/argocd" --overwrite
+                  aws ssm put-parameter --name "GiteaURL" --type "String" --value "https://$DNS_ENGINEERING/gitea" --overwrite
+                  aws ssm put-parameter --name "KeycloakURL" --type "String" --value "https://$DNS_ENGINEERING/keycloak" --overwrite
+                  aws ssm put-parameter --name "BackstageURL" --type "String" --value "https://$DNS_ENGINEERING/" --overwrite
+                  aws ssm put-parameter --name "ArgoWorkflowURL" --type "String" --value "https://$DNS_ENGINEERING/argo-workflows" --overwrite
+                  aws ssm put-parameter --name "JupyterHubURL" --type "String" --value "https://$DNS_ENGINEERING/jupyterhub" --overwrite
+                  aws ssm put-parameter --name "GrafanaWorkSpaceURL" --type "String" --value "https://$WORKSPACE_ENDPOINT/" --overwrite
+                  aws ssm put-parameter --name "ArgoCDPW" --type "String" --value="$ARGOCDPW" --overwrite
+                  aws ssm put-parameter --name "GiteaPW" --type "String" --value="$GITEAPW" --overwrite
+                  aws ssm put-parameter --name "KeycloakPW" --type "String" --value="$KEYCLOAKPW" --overwrite
+                  aws ssm put-parameter --name "KeycloakIDPPassword" --type "String" --value="$KEYCLOAKIDPPASSWORD" --overwrite
+                  aws ssm put-parameter --name "GrafanaAdminPW" --type "String" --value="$GRAFANAADMINPW" --overwrite
+                  
+                  # Store secrets in Vault if available (parallel to SSM storage)
+                  if command -v vault >/dev/null 2>&1 && [ "$VAULT_ENABLED" = "true" ] && [ -n "$VAULT_ADDR" ] && [ -n "$VAULT_TOKEN" ]; then
+                    echo "Storing platform secrets in Vault..."
+                    
+                    # Store platform URLs in Vault
+                    vault kv put secret/platform/urls \
+                      argocd="https://$DNS_ENGINEERING/argocd" \
+                      gitea="https://$DNS_ENGINEERING/gitea" \
+                      keycloak="https://$DNS_ENGINEERING/keycloak" \
+                      backstage="https://$DNS_ENGINEERING/" \
+                      argo_workflows="https://$DNS_ENGINEERING/argo-workflows" \
+                      jupyterhub="https://$DNS_ENGINEERING/jupyterhub" \
+                      grafana="https://$WORKSPACE_ENDPOINT/" \
+                      vscode_url="https://$(aws cloudformation describe-stacks --stack-name ${AWS::StackName} --query 'Stacks[0].Outputs[?OutputKey==`VSCodeServerURL`].OutputValue' --output text 2>/dev/null || echo 'pending')"
+                    
+                    # Store platform credentials in Vault
+                    vault kv put secret/platform/credentials \
+                      argocd_admin_password="$ARGOCDPW" \
+                      gitea_admin_password="$GITEAPW" \
+                      keycloak_admin_password="$KEYCLOAKPW" \
+                      keycloak_idp_password="$KEYCLOAKIDPPASSWORD" \
+                      grafana_admin_password="$GRAFANAADMINPW" \
+                      vscode_password="$(aws sts get-caller-identity --query Account --output text)"
+                    
+                    # Store EC2 Key Pair information in Vault (Note: Private key must be retrieved from CloudFormation outputs)
+                    if [ -n "${EC2KeyPair}" ]; then
+                      # Store key pair metadata and instructions for private key retrieval
+                      vault kv put secret/platform/ssh \
+                        key_name="${EC2KeyPair}" \
+                        username="ubuntu" \
+                        usage="SSH access to VSCode instances" \
+                        instructions="Download private key from AWS Console: EC2 > Key Pairs > ${EC2KeyPair} > Actions > Download private key" \
+                        stack_name="${AWS::StackName}" \
+                        created_by="CloudFormation"
+                      
+                      echo "EC2 Key Pair metadata stored in Vault. Private key must be downloaded from AWS Console."
+                    fi
+                    
+                    # Store Anthropic API key in Vault if provided
+                    if [ "${AnthropicApiKey}" != "" ]; then
+                      vault kv put secret/platform/api-keys \
+                        anthropic_api_key="${AnthropicApiKey}" \
+                        usage="Claude Code integration"
+                    fi
+                    
+                    echo "Platform secrets stored in Vault successfully"
+                  else
+                    echo "Vault not available or not configured, secrets stored in SSM only"
+                  fi
+          - action: aws:runShellScript
+            name: UpdateEnvVariables
+            inputs:
+              runCommand:
+                - |
+                  export KUBECONFIG=/home/ubuntu/.kube/config
+                  aws eks --region us-west-2 update-kubeconfig --name modern-engineering
+                  sudo chmod 777 /home/ubuntu/.kube/config
+                  export DNS_ENGINEERING=$(aws elbv2 describe-load-balancers | jq '.LoadBalancers[] | select(.LoadBalancerName == "modern-engg") | .DNSName' | tr -d '"')
+                  export WORKSPACE_ENDPOINT=$(aws grafana list-workspaces | jq '.workspaces[] | select(.name == "aws-observability-accelerator") | .endpoint' | tr -d '"')
+                  export ARGOCDPW=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)
+                  export GITEAPW=$(kubectl get secrets -n gitea gitea-credential -o jsonpath="{.data.password}" | base64 -d)
+                  export KEYCLOAKPW=$(kubectl get secrets -n keycloak keycloak-config -o jsonpath="{.data.KEYCLOAK_ADMIN_PASSWORD}" | base64 -d)
+                  export KEYCLOAKIDPPASSWORD=$(kubectl get secrets -n keycloak keycloak-user-config -o jsonpath="{.data.user1-password}" | base64 -d)
+                  export GRAFANASECRETARN=$(aws secretsmanager list-secrets --filter Key="name",Values="modern-engg/amg"| jq '.SecretList[0].ARN' | tr -d '"')
+                  export GRAFANAADMINPW=$(aws secretsmanager get-secret-value --secret-id $GRAFANASECRETARN --query SecretString --output text | jq '."amg-admin-password"' | tr -d '"')
+                  echo "Setting DNS_ENGINEERING..."
+                  echo "export DNS_ENGINEERING=$(aws elbv2 describe-load-balancers | jq '.LoadBalancers[] | select(.LoadBalancerName == "modern-engg") | .DNSName' | tr -d '"')" >> /home/ubuntu/.bashrc
+                  echo "Setting WORKSPACE_ENDPOINT..."
+                  echo "export WORKSPACE_ENDPOINT=$(aws grafana list-workspaces | jq '.workspaces[] | select(.name == "aws-observability-accelerator") | .endpoint' | tr -d '"')" >> /home/ubuntu/.bashrc
+                  echo "Setting GRAFANA_WORKSPACE_URL..."
+                  echo 'export GRAFANA_WORKSPACE_URL="https://$WORKSPACE_ENDPOINT/"' >> /home/ubuntu/.bashrc
+                  echo "Setting ARGOCDURL..."
+                  echo 'export ARGOCDURL="https://$DNS_ENGINEERING/argocd"' >> /home/ubuntu/.bashrc
+                  echo "Setting GITEAURL..."
+                  echo 'export GITEAURL="https://$DNS_ENGINEERING/gitea"' >> /home/ubuntu/.bashrc
+                  echo "Setting JUPYTERHUBURL..."
+                  echo 'export JUPYTERHUBURL="https://$DNS_ENGINEERING/jupyterhub"' >> /home/ubuntu/.bashrc
+                  echo "Setting KEYCLOAKURL..."
+                  echo 'export KEYCLOAKURL="https://$DNS_ENGINEERING/keycloak"' >> /home/ubuntu/.bashrc
+                  echo "Setting BACKSTAGEURL..."
+                  echo 'export BACKSTAGEURL="https://$DNS_ENGINEERING/"' >> /home/ubuntu/.bashrc
+                  echo "Setting ARGOWFURL..."
+                  echo 'export ARGOWFURL="https://${DNS_ENGINEERING}/argo-workflows"' >> /home/ubuntu/.bashrc
+                  echo "Setting GRAFANASECRETARN..."
+                  echo "export GRAFANASECRETARN=$(aws secretsmanager list-secrets --filter Key="name",Values="modern-engg/amg"| jq '.SecretList[0].ARN' | tr -d '"')" >> /home/ubuntu/.bashrc
+                  echo "Setting GRAFANAADMINPW..."
+                  echo "export GRAFANAADMINPW=$(aws secretsmanager get-secret-value --secret-id $GRAFANASECRETARN --query SecretString --output text | jq '."amg-admin-password"' | tr -d '"')" >> /home/ubuntu/.bashrc
+                  echo "Setting ARGOCDPW..."
+                  echo "export ARGOCDPW=$(kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d)" >> /home/ubuntu/.bashrc
+                  echo "Setting GITEAPW..."
+                  echo "export GITEAPW=$(kubectl get secrets -n gitea gitea-credential -o jsonpath="{.data.password}" | base64 -d)" >> /home/ubuntu/.bashrc
+                  echo "Setting KEYCLOAKPW..."
+                  echo "export KEYCLOAKPW=$(kubectl get secrets -n keycloak keycloak-config -o jsonpath="{.data.KEYCLOAK_ADMIN_PASSWORD}" | base64 -d)" >> /home/ubuntu/.bashrc
+                  echo "Setting KEYCLOAKIDPPASSWORD..."
+                  echo "export KEYCLOAKIDPPASSWORD=$(kubectl get secrets -n keycloak keycloak-user-config -o jsonpath="{.data.user1-password}" | base64 -d)" >> /home/ubuntu/.bashrc
+          - action: aws:runShellScript
+            name: EKSContextSwitching
+            inputs:
+              runCommand:
+                - |
+                  cat << 'EOF' >> /home/ubuntu/.bashrc
+                  # Get list of all EKS clusters
+                  clusters=$(aws eks list-clusters --output json | jq -r '.clusters[]')
+
+                  # Exit if no clusters found
+                  if [ -z "$clusters" ]; then
+                      echo "No EKS clusters found"
+                      exit 0
+                  fi
+
+                  # Process each cluster
+                  for cluster in $clusters; do
+                      echo "Processing cluster: $cluster"
+
+                      trimmed_cluster=${cluster%$'\n'}
+
+                      # Update kubeconfig for this cluster
+                      aws eks update-kubeconfig --name "$cluster"
+
+                      echo $cluster
+
+                      # Get the cluster ARN
+                      cluster_arn=$(aws eks describe-cluster --name "$cluster" --query 'cluster.arn' --output text)
+
+                      # Create kubeswitch alias
+                      # Note: Using the cluster name as the alias for simplicity
+                      echo "Creating switch alias for $cluster"
+
+                      IFSHolder=$IFS
+                      IFS='-'
+                      read modern aliasname <<< $cluster
+                      echo $aliasname
+                      alias ${aliasname}="kubectl config use-context $cluster_arn"
+                      echo "----------------------------------------"
+                      IFS=$IFSHolder
+                  done
+
+                  echo "All clusters processed. You can now use 'switch' to switch between contexts"
+                  echo "Available aliases: engineering, dev, prod"
+                  EOF
+                - sudo chown ubuntu:ubuntu /home/ubuntu -R
+          - action: aws:runShellScript
+            name: NginxControllerOutputs
+            inputs:
+              runCommand:
+                - |
+                  #!/bin/bash
+                  export KUBECONFIG=/home/ubuntu/.kube/config
+                  sudo chmod 777 /home/ubuntu/.kube/config
+                  aws eks --region us-west-2 update-kubeconfig --name modern-engineering
+                  hostname=""
+                  while [[ -z $hostname ]]; do
+                    echo "Waiting for nginx-ingress hostname"
+                    hostname=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                    [[ -z "$hostname" ]] && sleep 10
+                  done
+                  echo 'Management Cluster URL: '$hostname
+                  aws eks --region us-west-2 update-kubeconfig --name modernengg-dev
+                  hostname=""
+                  while [[ -z $hostname ]]; do
+                    echo "Waiting for nginx-ingress hostname"
+                    hostname=$(kubectl get svc ingress-nginx-dev-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                    [[ -z "$hostname" ]] && sleep 10
+                  done
+                  echo 'Dev Cluster URL: '$hostname
+                  aws eks --region us-west-2 update-kubeconfig --name modernengg-prod
+                  hostname=""
+                  while [[ -z $hostname ]]; do
+                    echo "Waiting for nginx-ingress hostname"
+                    hostname=$(kubectl get svc ingress-nginx-prod-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                    [[ -z "$hostname" ]] && sleep 10
+                  done
+                  echo 'Prod Cluster URL: '$hostname
+                  cat << 'EOF' >> /home/ubuntu/.bashrc
+                  dev
+                  export DNS_DEV=$(kubectl get svc ingress-nginx-dev-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                  prod
+                  export DNS_PROD=$(kubectl get svc ingress-nginx-prod-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                  engineering
+                  export DNS_ENGINEERING=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+                  EOF
+          - action: aws:runShellScript
+            name: ConfirmScriptComplete
+            inputs:
+              runCommand:
+                # Check if clusters are up
+                - '#!/bin/bash'
+                - !Sub export waiter="${WaitHandle}"
+                - |
+                  export uid=$(uuidgen)
+                  cat <<< '{"Status":"'SUCCESS'","UniqueId":"'${uid}'","Data":"SSM Script Run Finished","Reason":"Exit code: '0'"}' > /tmp/payload
+                  cat /tmp/payload
+                  curl -T /tmp/payload $waiter;
+
+
+  VSCodeInstanceSSMAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: !Ref VSCodeInstanceSSMDoc
+      OutputLocation:
+        S3Location:
+          OutputS3BucketName: !Ref SSMLogBucket
+          OutputS3KeyPrefix: bootstrap
+      Targets:
+        - Key: tag:SSMBootstrap
+          Values: [True]
+
+### Lambda@Edge Resources ###
+  LambdaEdgeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+                - edgelambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub AutoScalingAccess-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:UpdateAutoScalingGroup
+                  - autoscaling:SetDesiredCapacity
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+
+  VSCodeScalerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-vscode-scaler
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaEdgeExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          import os
+          
+          def lambda_handler(event, context):
+              # Lambda@Edge origin request event
+              request = event['Records'][0]['cf']['request']
+              
+              # Get ASG name from environment variable
+              asg_name = os.environ.get('ASG_NAME')
+              region = os.environ.get('AWS_REGION', 'us-west-2')
+              
+              # Initialize clients
+              autoscaling = boto3.client('autoscaling', region_name=region)
+              ec2 = boto3.client('ec2', region_name=region)
+              
+              try:
+                  # Check current ASG state
+                  response = autoscaling.describe_auto_scaling_groups(
+                      AutoScalingGroupNames=[asg_name]
+                  )
+                  
+                  if not response['AutoScalingGroups']:
+                      return {
+                          'status': '503',
+                          'statusDescription': 'Service Unavailable',
+                          'body': 'Auto Scaling Group not found'
+                      }
+                  
+                  asg = response['AutoScalingGroups'][0]
+                  instances = asg['Instances']
+                  
+                  # If no instances, scale up with tier1 template
+                  if not instances:
+                      print(f"No instances found, scaling up ASG: {asg_name}")
+                      
+                      # Ensure we're using tier1 template for new instances
+                      tier1_template = os.environ.get('TIER1_TEMPLATE')
+                      if tier1_template:
+                          autoscaling.update_auto_scaling_group(
+                              AutoScalingGroupName=asg_name,
+                              LaunchTemplate={
+                                  'LaunchTemplateId': tier1_template,
+                                  'Version': '$Latest'
+                              }
+                          )
+                      
+                      autoscaling.set_desired_capacity(
+                          AutoScalingGroupName=asg_name,
+                          DesiredCapacity=1,
+                          HonorCooldown=False
+                      )
+                      
+                      # Wait for instance to be ready (max 3 minutes for Lambda@Edge)
+                      max_wait = 180  # 3 minutes
+                      wait_time = 0
+                      
+                      while wait_time < max_wait:
+                          time.sleep(10)
+                          wait_time += 10
+                          
+                          # Check for running instances
+                          response = autoscaling.describe_auto_scaling_groups(
+                              AutoScalingGroupNames=[asg_name]
+                          )
+                          instances = response['AutoScalingGroups'][0]['Instances']
+                          
+                          for instance in instances:
+                              if instance['LifecycleState'] == 'InService':
+                                  # Get instance details
+                                  ec2_response = ec2.describe_instances(
+                                      InstanceIds=[instance['InstanceId']]
+                                  )
+                                  
+                                  if ec2_response['Reservations']:
+                                      instance_details = ec2_response['Reservations'][0]['Instances'][0]
+                                      if instance_details['State']['Name'] == 'running':
+                                          # Update origin to point to new instance
+                                          request['origin']['custom']['domainName'] = instance_details['PublicDnsName']
+                                          print(f"Instance ready: {instance_details['PublicDnsName']}")
+                                          return request
+                      
+                      # If we get here, instance didn't start in time
+                      return {
+                          'status': '503',
+                          'statusDescription': 'Service Unavailable',
+                          'body': 'Instance is starting, please try again in a few minutes'
+                      }
+                  
+                  # Instance exists, check if it's healthy
+                  for instance in instances:
+                      if instance['LifecycleState'] == 'InService':
+                          # Get instance details
+                          ec2_response = ec2.describe_instances(
+                              InstanceIds=[instance['InstanceId']]
+                          )
+                          
+                          if ec2_response['Reservations']:
+                              instance_details = ec2_response['Reservations'][0]['Instances'][0]
+                              if instance_details['State']['Name'] == 'running':
+                                  # Update origin to point to existing instance
+                                  request['origin']['custom']['domainName'] = instance_details['PublicDnsName']
+                                  return request
+                  
+                  # No healthy instances found
+                  return {
+                      'status': '503',
+                      'statusDescription': 'Service Unavailable',
+                      'body': 'No healthy instances available'
+                  }
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  return {
+                      'status': '500',
+                      'statusDescription': 'Internal Server Error',
+                      'body': 'Error processing request'
+                  }
+      Environment:
+        Variables:
+          ASG_NAME: !Ref VSCodeAutoScalingGroup
+          AWS_REGION: !Ref AWS::Region
+          TIER1_TEMPLATE: !Ref VSCodeLaunchTemplateTier1
+          TIER2_TEMPLATE: !Ref VSCodeLaunchTemplateTier2
+          TIER3_TEMPLATE: !Ref VSCodeLaunchTemplateTier3
+
+  VSCodeScalerFunctionVersion:
+    Type: AWS::Lambda::Version
+    Properties:
+      FunctionName: !Ref VSCodeScalerFunction
+      Description: !Sub "Version for ${AWS::StackName}"
+
+  # Instance Type Scaling Lambda Function
+  InstanceTypeScalerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-instance-type-scaler
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaEdgeExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import time
+          import os
+          
+          def lambda_handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              # Parse SNS message
+              message = json.loads(event['Records'][0]['Sns']['Message'])
+              alarm_name = message['AlarmName']
+              new_state = message['NewStateValue']
+              
+              asg_name = os.environ['ASG_NAME']
+              region = os.environ['AWS_REGION']
+              
+              autoscaling = boto3.client('autoscaling', region_name=region)
+              ec2 = boto3.client('ec2', region_name=region)
+              
+              # Tier mapping
+              tier_templates = {
+                  'tier1': os.environ['TIER1_TEMPLATE'],
+                  'tier2': os.environ['TIER2_TEMPLATE'], 
+                  'tier3': os.environ['TIER3_TEMPLATE']
+              }
+              
+              try:
+                  # Get current ASG configuration
+                  response = autoscaling.describe_auto_scaling_groups(
+                      AutoScalingGroupNames=[asg_name]
+                  )
+                  
+                  if not response['AutoScalingGroups']:
+                      print(f"ASG {asg_name} not found")
+                      return
+                  
+                  asg = response['AutoScalingGroups'][0]
+                  current_template = asg['LaunchTemplate']['LaunchTemplateId']
+                  instances = asg['Instances']
+                  
+                  # Determine target tier based on alarm
+                  if 'HighCPU' in alarm_name and new_state == 'ALARM':
+                      # Scale up
+                      if current_template == tier_templates['tier1']:
+                          target_tier = 'tier2'
+                      elif current_template == tier_templates['tier2']:
+                          target_tier = 'tier3'
+                      else:
+                          print("Already at highest tier")
+                          return
+                  elif 'LowCPU' in alarm_name and new_state == 'ALARM':
+                      # Scale down
+                      if current_template == tier_templates['tier3']:
+                          target_tier = 'tier2'
+                      elif current_template == tier_templates['tier2']:
+                          target_tier = 'tier1'
+                      else:
+                          print("Already at lowest tier")
+                          return
+                  else:
+                      print(f"No action needed for alarm: {alarm_name}, state: {new_state}")
+                      return
+                  
+                  print(f"Scaling to {target_tier}")
+                  
+                  # Update ASG launch template
+                  autoscaling.update_auto_scaling_group(
+                      AutoScalingGroupName=asg_name,
+                      LaunchTemplate={
+                          'LaunchTemplateId': tier_templates[target_tier],
+                          'Version': '$Latest'
+                      }
+                  )
+                  
+                  # If there are running instances, replace them
+                  if instances:
+                      for instance in instances:
+                          if instance['LifecycleState'] == 'InService':
+                              print(f"Terminating instance {instance['InstanceId']} for upgrade")
+                              autoscaling.terminate_instance_in_auto_scaling_group(
+                                  InstanceId=instance['InstanceId'],
+                                  ShouldDecrementDesiredCapacity=False
+                              )
+                  
+                  print(f"Successfully updated ASG to use {target_tier}")
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  raise e
+      Environment:
+        Variables:
+          ASG_NAME: !Ref VSCodeAutoScalingGroup
+          AWS_REGION: !Ref AWS::Region
+          TIER1_TEMPLATE: !Ref VSCodeLaunchTemplateTier1
+          TIER2_TEMPLATE: !Ref VSCodeLaunchTemplateTier2
+          TIER3_TEMPLATE: !Ref VSCodeLaunchTemplateTier3
+
+  # SNS Topics for CloudWatch Alarms
+  HighCPUTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-high-cpu
+      Subscription:
+        - Protocol: lambda
+          Endpoint: !GetAtt InstanceTypeScalerFunction.Arn
+
+  LowCPUTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-low-cpu
+      Subscription:
+        - Protocol: lambda
+          Endpoint: !GetAtt InstanceTypeScalerFunction.Arn
+
+  # Lambda Permissions for SNS
+  HighCPULambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InstanceTypeScalerFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref HighCPUTopic
+
+  LowCPULambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InstanceTypeScalerFunction
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref LowCPUTopic
+
+  # CloudWatch Alarms
+  HighCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-HighCPU
+      AlarmDescription: Triggers when CPU utilization is high
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 75
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref VSCodeAutoScalingGroup
+      AlarmActions:
+        - !Ref HighCPUTopic
+      TreatMissingData: notBreaching
+
+  LowCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-LowCPU
+      AlarmDescription: Triggers when CPU utilization is consistently low
+      MetricName: CPUUtilization
+      Namespace: AWS/EC2
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 6  # 30 minutes of low usage
+      Threshold: 20
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value: !Ref VSCodeAutoScalingGroup
+      AlarmActions:
+        - !Ref LowCPUTopic
+      TreatMissingData: notBreaching
+
+### Empty S3 bucket resources ###
+  EmptyS3BucketExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub EmptyS3BucketPolicy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource: '*'
+
+  EmptyS3Bucket:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: EmptyS3BucketExecutionRole has the AWSLambdaBasicExecutionRole managed policy attached, allowing writing to CloudWatch logs
+          - id: W89
+            reason: Bootstrap function does not need the scaffolding of a VPC or provisioned concurrency
+          - id: W92
+            reason: Bootstrap function does not need provisioned concurrency
+    Properties:
+      Description: Empty S3 bucket CloudFormation custom resource
+      Handler: index.lambda_handler
+      Role:
+        Fn::GetAtt:
+          - EmptyS3BucketExecutionRole
+          - Arn
+      Runtime: python3.11
+      MemorySize: 1024
+      Timeout: 400
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import logging
+
+          logger = logging.getLogger(__name__)
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              logger.info('event: {}'.format(event))
+              logger.info('context: {}'.format(context))
+
+              if event['RequestType'] == 'Delete':
+                  try:
+                      AssetsBucketName = (event['ResourceProperties']['S3Bucket'])
+                      s3 = boto3.resource('s3')
+                      logger.info('S3 Object initialized')
+                      bucket = s3.Bucket(AssetsBucketName)
+                      logger.info('S3 bucket: ' + AssetsBucketName)
+                      bucket.objects.all().delete()
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='S3 bucket emptied: ' + AssetsBucketName )
+                  except Exception as e:
+                      logger.error(e, exc_info=True)
+                      cfnresponse.send(event, context, cfnresponse.FAILED, responseData={}, reason=str(e))
+              else:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData={}, reason='No action to take')
+
+  EmptyS3BucketLogGroup:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: KMS Key not required for encrypting this non sensitive data
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${EmptyS3Bucket}
+      RetentionInDays: 7
+
+  EmptyS3BucketCustomResource:
+    Type: Custom::EmptyS3Bucket
+    Properties:
+      ServiceToken: !GetAtt EmptyS3Bucket.Arn
+      S3Bucket: !Ref SSMLogBucket
+
+  ########### EC2 Resources ###########
+  VSCodeInstanceRole:
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: CodeWhisperer requires '*' as a resource, reference https://docs.aws.amazon.com/codewhisperer/latest/userguide/cloud9-setup.html#codewhisperer-IAM-policies
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: developer-env-VSCodeInstanceRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+                - ssm.amazonaws.com
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchAgentServerPolicy
+      Policies:
+        - PolicyName: !Sub WorkshopPermissions-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - eks:DescribeCluster
+                  - eks:ListClusters
+                  - eks:DescribeNodegroup
+                  - eks:ListNodegroups
+                  - eks:DescribeUpdate
+                  - eks:CreateCluster
+                  - eks:DeleteCluster
+                  - eks:UpdateClusterConfig
+                  - eks:UpdateClusterVersion
+                  - eks:CreateNodegroup
+                  - eks:DeleteNodegroup
+                  - eks:UpdateNodegroupConfig
+                  - eks:UpdateNodegroupVersion
+                  - eks:CreateAddon
+                  - eks:DeleteAddon
+                  - eks:DescribeAddon
+                  - eks:ListAddons
+                  - eks:UpdateAddon
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:GetRole
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:PassRole
+                  - iam:CreateInstanceProfile
+                  - iam:DeleteInstanceProfile
+                  - iam:AddRoleToInstanceProfile
+                  - iam:RemoveRoleFromInstanceProfile
+                  - iam:GetInstanceProfile
+                  - ec2:CreateVpc
+                  - ec2:DeleteVpc
+                  - ec2:CreateSubnet
+                  - ec2:DeleteSubnet
+                  - ec2:CreateInternetGateway
+                  - ec2:DeleteInternetGateway
+                  - ec2:AttachInternetGateway
+                  - ec2:DetachInternetGateway
+                  - ec2:CreateRouteTable
+                  - ec2:DeleteRouteTable
+                  - ec2:CreateRoute
+                  - ec2:DeleteRoute
+                  - ec2:AssociateRouteTable
+                  - ec2:DisassociateRouteTable
+                  - ec2:CreateSecurityGroup
+                  - ec2:DeleteSecurityGroup
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:AuthorizeSecurityGroupEgress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupEgress
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeKeyPairs
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:CreateTags
+                  - ec2:DeleteTags
+                  - cloudformation:*
+                  - autoscaling:*
+                  - elasticloadbalancing:*
+                  - logs:*
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                  - ssm:DeleteParameter
+                  - sts:GetCallerIdentity
+                Resource: '*'
+        - PolicyName: !Sub CDKAssumeRolePolicy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/cdk-*
+        - PolicyName: !Sub Codewhisperer-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codewhisperer:GenerateRecommendations
+                Resource: '*'
+        - PolicyName: !Sub AutoScalingPolicy-${AWS::Region}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - autoscaling:DescribeAutoScalingGroups
+                  - autoscaling:UpdateAutoScalingGroup
+                  - autoscaling:SetDesiredCapacity
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+
+  VSCodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref VSCodeInstanceRole
+
+  # Launch Templates for Different Instance Tiers
+  VSCodeLaunchTemplateTier1:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-vscode-tier1
+      LaunchTemplateData:
+        ImageId: >-
+          {{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}
+        InstanceType: t3.micro  # Tier 1: Light workload
+        KeyName: !Ref EC2KeyPair
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt VSCodeInstanceProfile.Arn
+        BlockDeviceMappings:
+          - Ebs:
+              VolumeSize: !Ref InstanceVolumeSize
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+            DeviceName: /dev/sda1
+        Monitoring:
+          Enabled: true
+        UserData:
+          Fn::Base64: !Sub |
+            #cloud-config
+            hostname: dev
+            runcmd:
+              - mkdir -p ${HomeFolder} && chown ubuntu:ubuntu ${HomeFolder}
+              - |
+                # Set Anthropic API key if provided
+                if [ "${AnthropicApiKey}" != "" ]; then
+                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /home/ubuntu/.bashrc
+                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /etc/environment
+                fi
+              - |
+                # Auto-shutdown script - checks every 5 minutes and shuts down if inactive
+                cat > /usr/local/bin/auto-shutdown.sh << 'EOF'
+                #!/bin/bash
+                
+                while true; do
+                  # Check for active SSH sessions
+                  ACTIVE_SESSIONS=$(who | wc -l)
+                  
+                  # Check for VSCode connections (nginx access logs in last 5 minutes)
+                  RECENT_ACCESS=$(find /var/log/nginx -name "access.log*" -mmin -5 | wc -l)
+                  
+                  # Check CPU usage (consider active if > 5%)
+                  CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | awk -F'%' '{print $1}')
+                  CPU_ACTIVE=$(echo "$CPU_USAGE > 5" | bc 2>/dev/null || echo 0)
+                  
+                  if [ "$ACTIVE_SESSIONS" -eq 0 ] && [ "$RECENT_ACCESS" -eq 0 ] && [ "$CPU_ACTIVE" -eq 0 ]; then
+                    echo "$(date): System appears idle, initiating shutdown in 30 seconds"
+                    shutdown -h +0.5 "Auto-shutdown: System has been idle for 5 minutes"
+                    break
+                  else
+                    echo "$(date): System active - Sessions: $ACTIVE_SESSIONS, Recent access: $RECENT_ACCESS, CPU: $CPU_USAGE%"
+                  fi
+                  
+                  sleep 300  # Check every 5 minutes
+                done
+                EOF
+                
+                chmod +x /usr/local/bin/auto-shutdown.sh
+                
+                # Create systemd service for auto-shutdown
+                cat > /etc/systemd/system/auto-shutdown.service << 'EOF'
+                [Unit]
+                Description=Auto Shutdown Service
+                After=multi-user.target
+                
+                [Service]
+                Type=simple
+                ExecStart=/usr/local/bin/auto-shutdown.sh
+                Restart=always
+                User=root
+                
+                [Install]
+                WantedBy=multi-user.target
+                EOF
+                
+                systemctl enable auto-shutdown.service
+                systemctl start auto-shutdown.service
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: SSMBootstrap
+                Value: True
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-vscode-tier1
+              - Key: InstanceTier
+                Value: tier1
+
+  VSCodeLaunchTemplateTier2:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-vscode-tier2
+      LaunchTemplateData:
+        ImageId: >-
+          {{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}
+        InstanceType: t3.small  # Tier 2: Medium workload
+        KeyName: !Ref EC2KeyPair
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt VSCodeInstanceProfile.Arn
+        BlockDeviceMappings:
+          - Ebs:
+              VolumeSize: !Ref InstanceVolumeSize
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+            DeviceName: /dev/sda1
+        Monitoring:
+          Enabled: true
+        UserData:
+          Fn::Base64: !Sub |
+            #cloud-config
+            hostname: dev
+            runcmd:
+              - mkdir -p ${HomeFolder} && chown ubuntu:ubuntu ${HomeFolder}
+              - |
+                # Set Anthropic API key if provided
+                if [ "${AnthropicApiKey}" != "" ]; then
+                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /home/ubuntu/.bashrc
+                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /etc/environment
+                fi
+              - |
+                # Auto-shutdown script - checks every 5 minutes and shuts down if inactive
+                cat > /usr/local/bin/auto-shutdown.sh << 'EOF'
+                #!/bin/bash
+                
+                while true; do
+                  # Check for active SSH sessions
+                  ACTIVE_SESSIONS=$(who | wc -l)
+                  
+                  # Check for VSCode connections (nginx access logs in last 5 minutes)
+                  RECENT_ACCESS=$(find /var/log/nginx -name "access.log*" -mmin -5 | wc -l)
+                  
+                  # Check CPU usage (consider active if > 5%)
+                  CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | awk -F'%' '{print $1}')
+                  CPU_ACTIVE=$(echo "$CPU_USAGE > 5" | bc 2>/dev/null || echo 0)
+                  
+                  if [ "$ACTIVE_SESSIONS" -eq 0 ] && [ "$RECENT_ACCESS" -eq 0 ] && [ "$CPU_ACTIVE" -eq 0 ]; then
+                    echo "$(date): System appears idle, initiating shutdown in 30 seconds"
+                    shutdown -h +0.5 "Auto-shutdown: System has been idle for 5 minutes"
+                    break
+                  else
+                    echo "$(date): System active - Sessions: $ACTIVE_SESSIONS, Recent access: $RECENT_ACCESS, CPU: $CPU_USAGE%"
+                  fi
+                  
+                  sleep 300  # Check every 5 minutes
+                done
+                EOF
+                
+                chmod +x /usr/local/bin/auto-shutdown.sh
+                
+                # Create systemd service for auto-shutdown
+                cat > /etc/systemd/system/auto-shutdown.service << 'EOF'
+                [Unit]
+                Description=Auto Shutdown Service
+                After=multi-user.target
+                
+                [Service]
+                Type=simple
+                ExecStart=/usr/local/bin/auto-shutdown.sh
+                Restart=always
+                User=root
+                
+                [Install]
+                WantedBy=multi-user.target
+                EOF
+                
+                systemctl enable auto-shutdown.service
+                systemctl start auto-shutdown.service
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: SSMBootstrap
+                Value: True
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-vscode-tier2
+              - Key: InstanceTier
+                Value: tier2
+
+  VSCodeLaunchTemplateTier3:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-vscode-tier3
+      LaunchTemplateData:
+        ImageId: >-
+          {{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}
+        InstanceType: c6a.large  # Tier 3: Heavy workload
+        KeyName: !Ref EC2KeyPair
+        SecurityGroupIds:
+          - !Ref SecurityGroup
+        IamInstanceProfile:
+          Arn: !GetAtt VSCodeInstanceProfile.Arn
+        BlockDeviceMappings:
+          - Ebs:
+              VolumeSize: !Ref InstanceVolumeSize
+              VolumeType: gp3
+              DeleteOnTermination: true
+              Encrypted: true
+            DeviceName: /dev/sda1
+        Monitoring:
+          Enabled: true
+        UserData:
+          Fn::Base64: !Sub |
+            #cloud-config
+            hostname: dev
+            runcmd:
+              - mkdir -p ${HomeFolder} && chown ubuntu:ubuntu ${HomeFolder}
+              - |
+                # Set Anthropic API key if provided
+                if [ "${AnthropicApiKey}" != "" ]; then
+                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /home/ubuntu/.bashrc
+                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /etc/environment
+                fi
+              - |
+                # Auto-shutdown script - checks every 5 minutes and shuts down if inactive
+                cat > /usr/local/bin/auto-shutdown.sh << 'EOF'
+                #!/bin/bash
+                
+                while true; do
+                  # Check for active SSH sessions
+                  ACTIVE_SESSIONS=$(who | wc -l)
+                  
+                  # Check for VSCode connections (nginx access logs in last 5 minutes)
+                  RECENT_ACCESS=$(find /var/log/nginx -name "access.log*" -mmin -5 | wc -l)
+                  
+                  # Check CPU usage (consider active if > 5%)
+                  CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | awk -F'%' '{print $1}')
+                  CPU_ACTIVE=$(echo "$CPU_USAGE > 5" | bc 2>/dev/null || echo 0)
+                  
+                  if [ "$ACTIVE_SESSIONS" -eq 0 ] && [ "$RECENT_ACCESS" -eq 0 ] && [ "$CPU_ACTIVE" -eq 0 ]; then
+                    echo "$(date): System appears idle, initiating shutdown in 30 seconds"
+                    shutdown -h +0.5 "Auto-shutdown: System has been idle for 5 minutes"
+                    break
+                  else
+                    echo "$(date): System active - Sessions: $ACTIVE_SESSIONS, Recent access: $RECENT_ACCESS, CPU: $CPU_USAGE%"
+                  fi
+                  
+                  sleep 300  # Check every 5 minutes
+                done
+                EOF
+                
+                chmod +x /usr/local/bin/auto-shutdown.sh
+                
+                # Create systemd service for auto-shutdown
+                cat > /etc/systemd/system/auto-shutdown.service << 'EOF'
+                [Unit]
+                Description=Auto Shutdown Service
+                After=multi-user.target
+                
+                [Service]
+                Type=simple
+                ExecStart=/usr/local/bin/auto-shutdown.sh
+                Restart=always
+                User=root
+                
+                [Install]
+                WantedBy=multi-user.target
+                EOF
+                
+                systemctl enable auto-shutdown.service
+                systemctl start auto-shutdown.service
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: SSMBootstrap
+                Value: True
+              - Key: Name
+                Value: !Sub ${AWS::StackName}-vscode-tier3
+              - Key: InstanceTier
+                Value: tier3
+
+  # Auto Scaling Group
+  VSCodeAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-vscode-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref VSCodeLaunchTemplateTier1
+        Version: !GetAtt VSCodeLaunchTemplateTier1.LatestVersionNumber
+      MinSize: 0
+      MaxSize: 1
+      DesiredCapacity: 0
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      HealthCheckType: EC2
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vscode-asg
+          PropagateAtLaunch: false
+        - Key: CurrentTier
+          Value: tier1
+          PropagateAtLaunch: false
+
+  ########### CloudFront Resources ###########
+  VSCodeInstanceCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: !Join ['-', ['VSCodeServer', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: all
+          EnableAcceptEncodingGzip: False
+          HeadersConfig:
+            HeaderBehavior: whitelist
+            Headers:
+              - Accept-Charset
+              - Authorization
+              - Origin
+              - Accept
+              - Referer
+              - Host
+              - Accept-Language
+              - Accept-Encoding
+              - Accept-Datetime
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: True
+        HttpVersion: http2
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - PATCH
+            - POST
+            - DELETE
+          CachePolicyId: !Ref VSCodeInstanceCachePolicy
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
+          TargetOriginId: !Sub CloudFront-${AWS::StackName}
+          ViewerProtocolPolicy: allow-all
+          LambdaFunctionAssociations:
+            - EventType: origin-request
+              LambdaFunctionARN: !Ref VSCodeScalerFunctionVersion
+              IncludeBody: false
+        Origins:
+          - DomainName: placeholder.example.com  # Will be dynamically updated by Lambda@Edge
+            Id: !Sub CloudFront-${AWS::StackName}
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+
+Outputs:
+  VSCodeServerPassword:
+    Description: VSCode-Server Password
+    Value: !Ref AWS::AccountId
+    Export:
+      Name: VSCodeServerPassword
+  VSCodeServerURL:
+    Description: VSCode-Server URL
+    Value: !Sub https://${CloudFrontDistribution.DomainName}/?folder=${HomeFolder}
+    Export:
+      Name: VSCodeServerURL
+  ArgoCDURL:
+    Description: ArgoCD URL
+    Value: !GetAtt ArgoCDURL.Value
+  ArgoCDUsername:
+    Description: ArgoCD Username
+    Value: admin
+  ArgoCDPW:
+    Description: ArgoCD PW
+    Value: !GetAtt ArgoCDPW.Value
+  GiteaURL:
+    Description: Gitea URL
+    Value: !GetAtt GiteaURL.Value
+  GiteaUserName:
+    Description: Gitea Username
+    Value: giteaAdmin
+  GiteaPW:
+    Description: Gitea PW
+    Value: !GetAtt GiteaPW.Value
+  JupyterHubURL:
+    Description: JupyterHub URL
+    Value: !GetAtt JupyterHubURL.Value
+  KeycloakURL:
+    Description: Keycloak URL
+    Value: !GetAtt KeycloakURL.Value
+  KeycloakUserName:
+    Description: Keycloak Username
+    Value: modernengg-admin
+  KeycloakPW:
+    Description: Keycloak PW
+    Value: !GetAtt KeycloakPW.Value
+  BackStageURL:
+    Description: Backstage URL
+    Value: !GetAtt BackstageURL.Value
+  KeycloakIDPUser:
+    Description: ArgoWorkflows and Backstage Username
+    Value: user1
+  KeycloakIDPPassword:
+    Description: Argo Workflow and Backstage PW
+    Value: !GetAtt KeycloakIDPPassword.Value
+  ArgoWorkflowsURL:
+    Description: Argo Workflows URL
+    Value: !GetAtt ArgoWorkflowURL.Value
+  GrafanaWorkSpaceURL:
+    Description: GrafanaWorkSpaceURL
+    Value: !GetAtt GrafanaWorkSpaceURL.Value
+  GrafanaAdminUser:
+    Description: Grafana Admin Username
+    Value: user1
+  GrafanaAdminPW:
+    Description: Grafana Admin Password
+    Value: !GetAtt KeycloakIDPPassword.Value
