@@ -1678,11 +1678,17 @@ Resources:
                   - iam:ListRolePolicies
                   - iam:ListAttachedRolePolicies
                   - iam:PassRole
+                  - iam:TagRole
+                  - iam:UntagRole
                   - iam:CreateInstanceProfile
                   - iam:DeleteInstanceProfile
                   - iam:AddRoleToInstanceProfile
                   - iam:RemoveRoleFromInstanceProfile
                   - iam:GetInstanceProfile
+                  - iam:CreateOpenIDConnectProvider
+                  - iam:DeleteOpenIDConnectProvider
+                  - iam:GetOpenIDConnectProvider
+                  - iam:TagOpenIDConnectProvider
                   - ec2:CreateVpc
                   - ec2:DeleteVpc
                   - ec2:CreateSubnet
@@ -1712,6 +1718,12 @@ Resources:
                   - ec2:DescribeInstanceTypes
                   - ec2:DescribeInstanceTypeOfferings
                   - ec2:DescribeAvailabilityZones
+                  - ec2:AllocateAddress
+                  - ec2:ReleaseAddress
+                  - ec2:DescribeAddresses
+                  - ec2:CreateNatGateway
+                  - ec2:DeleteNatGateway
+                  - ec2:DescribeNatGateways
                   - ec2:CreateTags
                   - ec2:DeleteTags
                   - cloudformation:*
