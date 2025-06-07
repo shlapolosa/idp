@@ -49,6 +49,16 @@ Parameters:
     Type: String
     Description: Optional ARN of existing Lambda@Edge function to reuse instead of creating new one
     Default: ""
+  SkipClusterSetup:
+    Type: String
+    Description: Skip EKS cluster creation (useful for updates or code-server only)
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  UpdateMode:
+    Type: String
+    Description: Set to true when updating existing stack to skip long-running operations
+    Default: "false"
+    AllowedValues: ["true", "false"]
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -121,6 +131,7 @@ Mappings:
 
 Conditions:
   CreateNewLambdaEdgeFunction: !Equals [!Ref ExistingLambdaEdgeFunctionArn, ""]
+  IsInitialDeployment: !Equals [!Ref UpdateMode, "false"]
 
 Resources:
   ########### Self guide specific Resources ###########
@@ -239,6 +250,7 @@ Resources:
 
   WaitCondition:
     Type: AWS::CloudFormation::WaitCondition
+    Condition: IsInitialDeployment
     DependsOn: VSCodeAutoScalingGroup
     Properties:
       Handle: !Ref WaitHandle
@@ -730,37 +742,34 @@ Resources:
                   git config --global user.email "workshop@example.com"
                   git config --global user.name "WorkshopParticipant"
                   
-                  # Clone IDP repository
-                  git clone ${BlueprintsRepo} idp-setup
+                  # Clone/Update IDP repository
+                  if [ -d "idp-setup" ]; then
+                    echo "📥 Updating existing IDP repository..."
+                    cd idp-setup
+                    git fetch origin
+                    git reset --hard origin/${BlueprintsBranch}
+                    git switch ${BlueprintsBranch}
+                    cd ..
+                  else
+                    echo "📥 Cloning IDP repository..."
+                    git clone ${BlueprintsRepo} idp-setup
+                    cd idp-setup
+                    git switch ${BlueprintsBranch}
+                    cd ..
+                  fi
                   cd idp-setup
-                  git switch ${BlueprintsBranch}
                   chmod +x setup-karpenter-vclusters.sh
                   
-                  # Create setup choice script
-                  cat > setup-choice.sh << 'EOF'
-                  #!/bin/bash
-                  
-                  echo "🚀 IDP Platform Setup Options"
-                  echo "=============================="
-                  echo
-                  echo "Choose your setup method:"
-                  echo "1) Original 3-cluster setup (legacy)"
-                  echo "2) Cost-optimized Karpenter + vCluster setup (recommended)"
-                  echo "3) Skip cluster setup (code-server only)"
-                  echo
-                  read -p "Enter choice (1-3) [default: 2]: " choice
-                  if [ -z "$choice" ]; then
+                  # Determine setup choice based on parameter
+                  if [ "${SkipClusterSetup}" = "true" ]; then
+                    choice=3
+                    echo "🚀 IDP Platform Setup - Skipping cluster creation as requested"
+                  else
                     choice=2
+                    echo "🚀 IDP Platform Setup - Creating EKS cluster"
                   fi
                   
                   case $choice in
-                      1)
-                          echo "Setting up original 3-cluster environment..."
-                          git clone https://github.com/aws-samples/appmod-blueprints
-                          cd appmod-blueprints/platform/infra/terraform
-                          chmod +x setup-environments.sh
-                          ./setup-environments.sh
-                          ;;
                       2)
                           echo "Setting up Karpenter + vCluster environment..."
                           echo "Creating EKS cluster: modern-engineering"
@@ -773,22 +782,7 @@ Resources:
                       3)
                           echo "Skipping cluster setup - code-server only mode"
                           ;;
-                      *)
-                          echo "Invalid choice, defaulting to Karpenter + vCluster setup"
-                          echo "Creating EKS cluster: modern-engineering"
-                          eksctl create cluster --name modern-engineering --region ${AWS::Region} --version 1.31 \
-                            --nodegroup-name workers --node-type t3.medium --nodes 2 --nodes-min 1 --nodes-max 4 \
-                            --managed --with-oidc --full-ecr-access
-                          aws eks update-kubeconfig --region ${AWS::Region} --name modern-engineering
-                          echo "✅ EKS cluster created successfully"
-                          ;;
                   esac
-                  EOF
-                  
-                  chmod +x setup-choice.sh
-                  
-                  # Run the setup (auto-select Karpenter option for automated deployment)
-                  echo "2" | ./setup-choice.sh
                   
                   # Download and setup kubeconfig manager
                   curl -fsSL https://raw.githubusercontent.com/shlapolosa/idp/main/kubeconfig-vault-manager.sh -o kubeconfig-vault-manager.sh
@@ -1164,6 +1158,7 @@ Resources:
 
   VSCodeInstanceSSMAssociation:
     Type: AWS::SSM::Association
+    Condition: IsInitialDeployment
     Properties:
       Name: !Ref VSCodeInstanceSSMDoc
       OutputLocation:
