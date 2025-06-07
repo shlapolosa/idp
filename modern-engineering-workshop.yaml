@@ -1665,6 +1665,8 @@ Resources:
                   - eks:DescribeAddon
                   - eks:ListAddons
                   - eks:UpdateAddon
+                  - eks:TagResource
+                  - eks:UntagResource
                   - iam:CreateRole
                   - iam:DeleteRole
                   - iam:AttachRolePolicy
