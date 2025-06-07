@@ -9,9 +9,7 @@ Parameters:
     Description: Initial instance type to launch (will auto-scale based on usage)
     Type: String
     Default: t3.micro
-    AllowedValues: [
-      t3.micro, t3.small, t3.medium, t3.large, c6a.large, c6a.xlarge, c6a.2xlarge, c6a.4xlarge, c6a.8xlarge, c6a.12xlarge, c6a.16xlarge, c6a.24xlarge, c6a.32xlarge, c6a.48xlarge
-    ]
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large, c6a.large, c6a.xlarge, c6a.2xlarge, c6a.4xlarge, c6a.8xlarge, c6a.12xlarge, c6a.16xlarge, c6a.24xlarge, c6a.32xlarge, c6a.48xlarge]
   HomeFolder:
     Type: String
     Description: The home folder in the VSCodeInstance
@@ -66,6 +64,7 @@ Metadata:
       - Label:
           default: Instance Configuration
         Parameters:
+          - InstanceType
           - InstanceVolumeSize
       - Label:
           default: Code Server Configuration
@@ -73,7 +72,26 @@ Metadata:
           - HomeFolder
           - DevServerBasePath
           - DevServerPort
+      - Label:
+          default: Assets and Repository Configuration
+        Parameters:
+          - AssetsBucketName
+          - AssetsBucketPrefix
+          - BlueprintsRepo
+          - BlueprintsBranch
+      - Label:
+          default: Integration Configuration
+        Parameters:
+          - AnthropicApiKey
+          - ExistingLambdaEdgeFunctionArn
+      - Label:
+          default: Deployment Configuration
+        Parameters:
+          - SkipClusterSetup
+          - UpdateMode
     ParameterLabels:
+      InstanceType:
+        default: EC2 instance type
       InstanceVolumeSize:
         default: Attached volume size
       HomeFolder:
@@ -82,6 +100,22 @@ Metadata:
         default: BasePath where the application runs
       DevServerPort:
         default: Port where the application runs
+      AssetsBucketName:
+        default: S3 bucket for assets
+      AssetsBucketPrefix:
+        default: S3 bucket prefix
+      BlueprintsRepo:
+        default: Blueprints repository URL
+      BlueprintsBranch:
+        default: Blueprints repository branch
+      AnthropicApiKey:
+        default: Anthropic API key for Claude
+      ExistingLambdaEdgeFunctionArn:
+        default: Existing Lambda@Edge function ARN
+      SkipClusterSetup:
+        default: Skip EKS cluster setup
+      UpdateMode:
+        default: Stack update mode
 Mappings:
   Subnets:
     VPC:
@@ -257,101 +291,8 @@ Resources:
       Timeout: '10800' # fully deployment must finish within 3hr, otherwise it is marked as failed for Workshop Studio
       Count: 4
 
-  ArgoCDURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: ArgoCDURL
-      Type: String
-      Value: "Error Creating Value"
-
-  GiteaURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: GiteaURL
-      Type: String
-      Value: "Error Creating Value"
-
-  KeycloakURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: KeycloakURL
-      Type: String
-      Value: "Error Creating Value"
-
-  BackstageURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: BackstageURL
-      Type: String
-      Value: "Error Creating Value"
-
-  ArgoWorkflowURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: ArgoWorkflowURL
-      Type: String
-      Value: "Error Creating Value"
-
-  JupyterHubURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: JupyterHubURL
-      Type: String
-      Value: "Error Creating Value"
-
-  GrafanaWorkSpaceURL:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: GrafanaWorkSpaceURL
-      Type: String
-      Value: "Error Creating Value"
-
-  ArgoCDPW:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: ArgoCDPW
-      Type: String
-      Value: "Error Creating Value"
-
-  GiteaPW:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: GiteaPW
-      Type: String
-      Value: "Error Creating Value"
-
-  KeycloakPW:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: KeycloakPW
-      Type: String
-      Value: "Error Creating Value"
-
-  KeycloakIDPPassword:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: KeycloakIDPPassword
-      Type: String
-      Value: "Error Creating Value"
-
-  GrafanaAdminPW:
-    Type: AWS::SSM::Parameter
-    Properties:
-      DataType: text
-      Name: GrafanaAdminPW
-      Type: String
-      Value: "Error Creating Value"
+  # Note: IDP Platform URLs and passwords will be populated by the Karpenter setup script
+  # These parameters will be updated after vClusters and applications are deployed
 
   SSMLogBucket:
     Type: AWS::S3::Bucket
@@ -779,7 +720,7 @@ Resources:
                           export CLOUD_PROVIDER=aws
                           export CLUSTER_NAME=modern-engineering
                           export REGION=${AWS::Region}
-                          export KARPENTER_VERSION=1.0.6
+                          export KARPENTER_VERSION=0.16.3
                           export VCLUSTER_VERSION=0.20.0
                           export K8S_VERSION=1.31
                           ./setup-karpenter-vclusters.sh
@@ -1762,6 +1703,22 @@ Resources:
                   - ssm:PutParameter
                   - ssm:DeleteParameter
                   - sts:GetCallerIdentity
+                  # Karpenter specific permissions
+                  - sqs:CreateQueue
+                  - sqs:DeleteQueue
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ReceiveMessage
+                  - sqs:SendMessage
+                  - sqs:SetQueueAttributes
+                  - sqs:TagQueue
+                  - sqs:UntagQueue
+                  - events:PutRule
+                  - events:PutTargets
+                  - events:DeleteRule
+                  - events:RemoveTargets
+                  - events:DescribeRule
+                  - events:ListTargetsByRule
                 Resource: '*'
         - PolicyName: !Sub CDKAssumeRolePolicy-${AWS::Region}
           PolicyDocument:
@@ -1798,6 +1755,103 @@ Resources:
     Properties:
       Roles:
         - !Ref VSCodeInstanceRole
+
+  ### Karpenter IAM Resources ###
+  KarpenterNodeInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub KarpenterNodeInstanceProfile-modern-engineering
+      Roles:
+        - !Ref KarpenterNodeRole
+
+  KarpenterNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub KarpenterNodeRole-modern-engineering
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKSWorkerNodePolicy
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEKS_CNI_Policy
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  KarpenterControllerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub KarpenterControllerRole-modern-engineering
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/modern-engineering
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                !Sub "modern-engineering:sub": "system:serviceaccount:karpenter:karpenter"
+                !Sub "modern-engineering:aud": "sts.amazonaws.com"
+      Policies:
+        - PolicyName: KarpenterControllerPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateFleet
+                  - ec2:CreateLaunchTemplate
+                  - ec2:CreateTags
+                  - ec2:DescribeAvailabilityZones
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceTypeOfferings
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeSecurityGroups
+                  - ec2:DescribeSpotPriceHistory
+                  - ec2:DescribeSubnets
+                  - ec2:DeleteLaunchTemplate
+                  - ec2:RunInstances
+                  - ec2:TerminateInstances
+                  - iam:PassRole
+                  - eks:DescribeCluster
+                  - iam:CreateServiceLinkedRole
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:ReceiveMessage
+                Resource: !GetAtt KarpenterInterruptionQueue.Arn
+
+  KarpenterInterruptionQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub Karpenter-modern-engineering
+      MessageRetentionPeriod: 300
+      SqsManagedSseEnabled: true
+
+  KarpenterInterruptionQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref KarpenterInterruptionQueue
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - events.amazonaws.com
+                - sqs.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt KarpenterInterruptionQueue.Arn
 
   # Launch Templates for Different Instance Tiers
   VSCodeLaunchTemplateTier1:
@@ -2169,53 +2223,53 @@ Outputs:
     Export:
       Name: VSCodeServerURL
   ArgoCDURL:
-    Description: ArgoCD URL
-    Value: !GetAtt ArgoCDURL.Value
+    Description: ArgoCD URL (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   ArgoCDUsername:
     Description: ArgoCD Username
     Value: admin
   ArgoCDPW:
-    Description: ArgoCD PW
-    Value: !GetAtt ArgoCDPW.Value
+    Description: ArgoCD PW (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   GiteaURL:
-    Description: Gitea URL
-    Value: !GetAtt GiteaURL.Value
+    Description: Gitea URL (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   GiteaUserName:
     Description: Gitea Username
     Value: giteaAdmin
   GiteaPW:
-    Description: Gitea PW
-    Value: !GetAtt GiteaPW.Value
+    Description: Gitea PW (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   JupyterHubURL:
-    Description: JupyterHub URL
-    Value: !GetAtt JupyterHubURL.Value
+    Description: JupyterHub URL (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   KeycloakURL:
-    Description: Keycloak URL
-    Value: !GetAtt KeycloakURL.Value
+    Description: Keycloak URL (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   KeycloakUserName:
     Description: Keycloak Username
     Value: modernengg-admin
   KeycloakPW:
-    Description: Keycloak PW
-    Value: !GetAtt KeycloakPW.Value
+    Description: Keycloak PW (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   BackStageURL:
-    Description: Backstage URL
-    Value: !GetAtt BackstageURL.Value
+    Description: Backstage URL (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   KeycloakIDPUser:
     Description: ArgoWorkflows and Backstage Username
     Value: user1
   KeycloakIDPPassword:
-    Description: Argo Workflow and Backstage PW
-    Value: !GetAtt KeycloakIDPPassword.Value
+    Description: Argo Workflow and Backstage PW (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   ArgoWorkflowsURL:
-    Description: Argo Workflows URL
-    Value: !GetAtt ArgoWorkflowURL.Value
+    Description: Argo Workflows URL (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   GrafanaWorkSpaceURL:
-    Description: GrafanaWorkSpaceURL
-    Value: !GetAtt GrafanaWorkSpaceURL.Value
+    Description: GrafanaWorkSpaceURL (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
   GrafanaAdminUser:
     Description: Grafana Admin Username
     Value: user1
   GrafanaAdminPW:
-    Description: Grafana Admin Password
-    Value: !GetAtt KeycloakIDPPassword.Value
+    Description: Grafana Admin Password (will be populated after vCluster setup)
+    Value: "Check SSM Parameter Store after deployment completes"
