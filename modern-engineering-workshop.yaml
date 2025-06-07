@@ -775,12 +775,15 @@ Resources:
                   case $choice in
                       2)
                           echo "Setting up Karpenter + vCluster environment..."
-                          echo "Creating EKS cluster: modern-engineering"
-                          eksctl create cluster --name modern-engineering --region ${AWS::Region} --version 1.31 \
-                            --nodegroup-name workers --node-type t3.medium --nodes 2 --nodes-min 1 --nodes-max 4 \
-                            --managed --with-oidc --full-ecr-access
-                          aws eks update-kubeconfig --region ${AWS::Region} --name modern-engineering
-                          echo "✅ EKS cluster created successfully"
+                          echo "Using Karpenter setup script for optimal node management"
+                          export CLOUD_PROVIDER=aws
+                          export CLUSTER_NAME=modern-engineering
+                          export REGION=${AWS::Region}
+                          export KARPENTER_VERSION=1.0.6
+                          export VCLUSTER_VERSION=0.20.0
+                          export K8S_VERSION=1.31
+                          ./setup-karpenter-vclusters.sh
+                          echo "✅ Karpenter + vCluster environment created successfully"
                           ;;
                       3)
                           echo "Skipping cluster setup - code-server only mode"
