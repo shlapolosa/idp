@@ -1795,8 +1795,8 @@ Resources:
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
-                !Sub "modern-engineering:sub": "system:serviceaccount:karpenter:karpenter"
-                !Sub "modern-engineering:aud": "sts.amazonaws.com"
+                "modern-engineering:sub": "system:serviceaccount:karpenter:karpenter"
+                "modern-engineering:aud": "sts.amazonaws.com"
       Policies:
         - PolicyName: KarpenterControllerPolicy
           PolicyDocument:
