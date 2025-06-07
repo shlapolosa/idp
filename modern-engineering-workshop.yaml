@@ -1686,6 +1686,7 @@ Resources:
                   - iam:DeleteOpenIDConnectProvider
                   - iam:GetOpenIDConnectProvider
                   - iam:TagOpenIDConnectProvider
+                  - iam:CreateServiceLinkedRole
                   - ec2:CreateVpc
                   - ec2:DeleteVpc
                   - ec2:CreateSubnet
