@@ -1293,9 +1293,13 @@ Resources:
                                       instance_details = ec2_response['Reservations'][0]['Instances'][0]
                                       if instance_details['State']['Name'] == 'running':
                                           # Update origin to point to new instance
-                                          request['origin']['custom']['domainName'] = instance_details['PublicDnsName']
-                                          print(f"Instance ready: {instance_details['PublicDnsName']}")
-                                          return request
+                                          public_ip = instance_details.get('PublicIpAddress')
+                                          if public_ip:
+                                              request['origin']['custom']['domainName'] = public_ip
+                                              request['origin']['custom']['protocol'] = 'http'
+                                              request['origin']['custom']['port'] = 80
+                                              print(f"Instance ready: {public_ip}")
+                                              return request
                       
                       # If we get here, instance didn't start in time
                       return {
@@ -1316,8 +1320,12 @@ Resources:
                               instance_details = ec2_response['Reservations'][0]['Instances'][0]
                               if instance_details['State']['Name'] == 'running':
                                   # Update origin to point to existing instance
-                                  request['origin']['custom']['domainName'] = instance_details['PublicDnsName']
-                                  return request
+                                  public_ip = instance_details.get('PublicIpAddress')
+                                  if public_ip:
+                                      request['origin']['custom']['domainName'] = public_ip
+                                      request['origin']['custom']['protocol'] = 'http'
+                                      request['origin']['custom']['port'] = 80
+                                      return request
                   
                   # No healthy instances found
                   return {
