@@ -589,11 +589,14 @@ Resources:
                       listen [::]:80;
                       server_name ${CloudFrontDistribution.DomainName};
                       location / {
-                        proxy_pass http://localhost:3000/;
+                        proxy_pass http://localhost:8080/;
                         proxy_set_header Host \$host;
                         proxy_set_header Upgrade \$http_upgrade;
                         proxy_set_header Connection upgrade;
                         proxy_set_header Accept-Encoding gzip;
+                        proxy_set_header X-Real-IP \$remote_addr;
+                        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                        proxy_set_header X-Forwarded-Proto \$scheme;
                       }
                       location /${DevServerBasePath} {
                         proxy_pass http://localhost:${DevServerPort}/${DevServerBasePath};
@@ -606,10 +609,10 @@ Resources:
                   EOF
                 - |
                   sudo tee /home/ubuntu/.config/code-server/config.yaml <<EOF
-                  bind-addr: 127.0.0.1:3000
-                  cert: false
+                  bind-addr: 127.0.0.1:8080
                   auth: password
-                  hashed-password: "$(echo -n $(aws sts get-caller-identity --query "Account" --output text) | sudo npx argon2-cli -e)"
+                  password: ${AWS::AccountId}
+                  cert: false
                   EOF
                 - sudo -u ubuntu --login mkdir -p /home/ubuntu/.local/share/code-server/User/
                 - sudo -u ubuntu --login touch /home/ubuntu/.local/share/code-server/User/settings.json
@@ -1223,7 +1226,8 @@ Resources:
               function_name = context.function_name
               stack_name = function_name.replace('-vscode-scaler', '')
               asg_name = f"{stack_name}-vscode-asg"
-              region = 'us-east-1'  # Lambda@Edge always runs in us-east-1
+              # Lambda@Edge runs in us-east-1 but our resources are in the actual region
+              region = '${AWS::Region}'
               
               # Initialize clients
               autoscaling = boto3.client('autoscaling', region_name=region)
