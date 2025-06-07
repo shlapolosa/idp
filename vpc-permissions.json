@@ -1,0 +1,22 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "ec2:ModifyVpcAttribute",
+                "ec2:DescribeVpcAttribute",
+                "ec2:ModifySubnetAttribute",
+                "ec2:DescribeSubnets",
+                "ec2:DescribeRouteTables",
+                "ec2:CreateRoute",
+                "ec2:ReplaceRoute",
+                "ec2:DeleteRoute",
+                "ec2:DescribeVpcEndpoints",
+                "ec2:CreateVpcEndpoint",
+                "ec2:DeleteVpcEndpoint"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
