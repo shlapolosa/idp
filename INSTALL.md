@@ -23,7 +23,7 @@ chmod +x deploy.sh
 
 # Option 1b: With Claude Code Integration
 export ANTHROPIC_API_KEY="your-api-key-here"
-./deploy.sh
+./deploy.sh --stack-name modern-engineering-workshop --region us-east-1
 
 # Option 2: Karpenter + vCluster Platform (recommended for teams)
 chmod +x setup-karpenter-vclusters.sh
