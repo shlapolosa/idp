@@ -58,6 +58,10 @@ Parameters:
     Description: Set to true when updating existing stack to skip long-running operations
     Default: "false"
     AllowedValues: ["true", "false"]
+  VSCodeOriginDNS:
+    Type: String
+    Description: Public DNS name of the VS Code EC2 instance (enter after first deploy)
+    Default: placeholder.example.com 
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -165,7 +169,6 @@ Mappings:
       PrefixList: pl-82a045eb
 
 Conditions:
-  CreateNewLambdaEdgeFunction: !Equals [!Ref ExistingLambdaEdgeFunctionArn, ""]
   IsInitialDeployment: !Equals [!Ref UpdateMode, "false"]
 
 Resources:
@@ -283,14 +286,15 @@ Resources:
   WaitHandle:
     Type: AWS::CloudFormation::WaitConditionHandle
 
+
   WaitCondition:
     Type: AWS::CloudFormation::WaitCondition
     Condition: IsInitialDeployment
     DependsOn: VSCodeAutoScalingGroup
     Properties:
       Handle: !Ref WaitHandle
-      Timeout: '10800' # fully deployment must finish within 3hr, otherwise it is marked as failed for Workshop Studio
-      Count: 4
+      Timeout: '7200'          # 2 h
+      Count: 1                 # << previously 4
 
   # Note: IDP Platform URLs and passwords will be populated by the Karpenter setup script
   # These parameters will be updated after vClusters and applications are deployed
@@ -350,7 +354,6 @@ Resources:
             allowedValues:
               - dotnet-sdk-8.0
               - dotnet-sdk-7.0
-              - dotnet-sdk-8.0
         mainSteps:
           - action: aws:runShellScript
             name: SetLoggingAndHomeDir
@@ -740,30 +743,6 @@ Resources:
                   # Set ownership
                   sudo chown ubuntu:ubuntu ${HomeFolder} -R
           - action: aws:runShellScript
-            name: FunctionalDeploymentTesting
-            inputs:
-              runCommand:
-                # Check if main cluster and vClusters are up
-                - '#!/bin/bash'
-                - !Sub export waiter="${WaitHandle}"
-                - |
-                  # Check main EKS cluster
-                  cluster="modern-engineering"
-                  aws eks wait cluster-active --name $cluster 2>/dev/null
-                  aws eks describe-cluster --name $cluster --no-paginate --no-cli-pager 2>/dev/null;
-                  export code=$?;
-                  if [[ $code == 0 ]]; then
-                    export status="SUCCESS"
-                    echo "Main cluster $cluster is active"
-                  else
-                    export status="SUCCESS"  # Don't fail if cluster setup was skipped
-                    echo "Cluster setup may have been skipped or is still initializing"
-                  fi
-                  export uid=$(uuidgen)
-                  cat <<< '{"Status":"'${status}'","UniqueId":"'${uid}'","Data":"Main cluster or code-server setup completed.","Reason":"Setup process finished with exit code: '${code}'"}' > /tmp/payload
-                  cat /tmp/payload
-                  curl -T /tmp/payload $waiter;
-          - action: aws:runShellScript
             name: CloneGiteaRepos
             inputs:
               runCommand:
@@ -1039,69 +1018,20 @@ Resources:
                   echo "Available aliases: engineering, dev, prod"
                   EOF
                 - sudo chown ubuntu:ubuntu /home/ubuntu -R
-          - action: aws:runShellScript
-            name: NginxControllerOutputs
+          - name: ConfirmScriptComplete
+            action: aws:runShellScript
             inputs:
               runCommand:
                 - !Sub |
-                  #!/bin/bash
-                  export KUBECONFIG=/home/ubuntu/.kube/config
-                  sudo chmod 777 /home/ubuntu/.kube/config
-                  aws eks --region ${AWS::Region} update-kubeconfig --name modern-engineering
-                  hostname=""
-                  while [[ -z $hostname ]]; do
-                    echo "Waiting for nginx-ingress hostname"
-                    hostname=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-                    [[ -z "$hostname" ]] && sleep 10
-                  done
-                  echo 'Management Cluster URL: '$hostname
-                  aws eks --region ${AWS::Region} update-kubeconfig --name modernengg-dev
-                  hostname=""
-                  while [[ -z $hostname ]]; do
-                    echo "Waiting for nginx-ingress hostname"
-                    hostname=$(kubectl get svc ingress-nginx-dev-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-                    [[ -z "$hostname" ]] && sleep 10
-                  done
-                  echo 'Dev Cluster URL: '$hostname
-                  aws eks --region ${AWS::Region} update-kubeconfig --name modernengg-prod
-                  hostname=""
-                  while [[ -z $hostname ]]; do
-                    echo "Waiting for nginx-ingress hostname"
-                    hostname=$(kubectl get svc ingress-nginx-prod-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-                    [[ -z "$hostname" ]] && sleep 10
-                  done
-                  echo 'Prod Cluster URL: '$hostname
-                  cat << 'EOF' >> /home/ubuntu/.bashrc
-                  dev
-                  export DNS_DEV=$(kubectl get svc ingress-nginx-dev-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-                  prod
-                  export DNS_PROD=$(kubectl get svc ingress-nginx-prod-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-                  engineering
-                  export DNS_ENGINEERING=$(kubectl get svc ingress-nginx-controller -n ingress-nginx -o=jsonpath='{.status.loadBalancer.ingress[0].hostname}')
-                  EOF
-          - action: aws:runShellScript
-            name: ConfirmScriptComplete
-            inputs:
-              runCommand:
-                # Check if clusters are up
-                - '#!/bin/bash'
-                - !Sub export waiter="${WaitHandle}"
-                - !Sub export asg_name="${VSCodeAutoScalingGroup}"
-                - !Sub |
-                  # Scale ASG back to 0 for cost optimization (Lambda@Edge will scale on-demand)
-                  echo "🔧 Scaling ASG back to 0 for cost optimization..."
-                  aws autoscaling set-desired-capacity \
-                    --auto-scaling-group-name $asg_name \
-                    --desired-capacity 0 \
-                    --region ${AWS::Region}
-                  
-                  echo "✅ Setup complete! ASG scaled to 0. Lambda@Edge will auto-scale on first access."
-                - |
-                  # Signal successful completion
-                  export uid=$(uuidgen)
-                  cat <<< '{"Status":"'SUCCESS'","UniqueId":"'${uid}'","Data":"SSM Script Run Finished and ASG Scaled to 0","Reason":"Exit code: '0'"}' > /tmp/payload
-                  cat /tmp/payload
-                  curl -T /tmp/payload $waiter;
+                    #!/bin/bash
+                    echo "Bootstrap script finished"
+                    waiter='${WaitHandle}'
+                    uid=$(uuidgen)
+                    cat > /tmp/payload <<EOF
+                    {"Status":"SUCCESS","UniqueId":"$uid","Data":"Bootstrap complete"}
+                    EOF
+                    curl -T /tmp/payload $waiter
+                - echo "✅ stack bootstrap complete"
 
 
   VSCodeInstanceSSMAssociation:
@@ -1116,310 +1046,6 @@ Resources:
       Targets:
         - Key: tag:SSMBootstrap
           Values: [True]
-
-### Lambda@Edge Resources ###
-  LambdaEdgeExecutionRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-                - edgelambda.amazonaws.com
-            Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
-      Policies:
-        - PolicyName: !Sub AutoScalingAccess-${AWS::Region}
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - autoscaling:DescribeAutoScalingGroups
-                  - autoscaling:UpdateAutoScalingGroup
-                  - autoscaling:SetDesiredCapacity
-                  - ec2:DescribeInstances
-                  - ec2:DescribeInstanceStatus
-                Resource: '*'
-
-  VSCodeScalerFunction:
-    Type: AWS::Lambda::Function
-    Condition: CreateNewLambdaEdgeFunction
-    Properties:
-      FunctionName: !Sub ${AWS::StackName}-vscode-scaler
-      Runtime: python3.11
-      Handler: index.lambda_handler
-      Role: !GetAtt LambdaEdgeExecutionRole.Arn
-      Timeout: 30
-      MemorySize: 128
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import os
-
-          def lambda_handler(event, context):
-              # CloudFront origin-request event
-              request = event['Records'][0]['cf']['request']
-
-              # Derive stack and ASG name
-              function_name = context.function_name
-              stack_name = function_name.replace('-vscode-scaler', '')
-              asg_name = f"{stack_name}-vscode-asg"
-              region = os.environ.get('AWS_REGION', 'us-east-1')
-
-              autoscaling = boto3.client('autoscaling', region_name=region)
-              ec2 = boto3.client('ec2', region_name=region)
-
-              def healthy_instance_ip():
-                  try:
-                      asg = autoscaling.describe_auto_scaling_groups(
-                          AutoScalingGroupNames=[asg_name]
-                      )['AutoScalingGroups']
-                      if not asg:
-                          return None
-                      instances = asg[0]['Instances']
-                      if not instances:
-                          return None
-                      in_service = [i['InstanceId'] for i in instances
-                                    if i['LifecycleState'] == 'InService']
-                      if not in_service:
-                          return None
-                      statuses = ec2.describe_instance_status(
-                          InstanceIds=in_service
-                      )['InstanceStatuses']
-                      healthy_ids = [
-                          s['InstanceId'] for s in statuses
-                          if s['InstanceStatus']['Status'] == 'ok' and s['SystemStatus']['Status'] == 'ok'
-                      ]
-                      if not healthy_ids:
-                          return None
-                      desc = ec2.describe_instances(InstanceIds=[healthy_ids[0]])
-                      return desc['Reservations'][0]['Instances'][0].get('PublicIpAddress')
-                  except Exception as e:
-                      print(f"Health-check error: {e}")
-                      return None
-
-              ip = healthy_instance_ip()
-              if ip:
-                  request['origin']['custom']['domainName'] = ip
-                  request['origin']['custom']['protocol'] = 'http'
-                  request['origin']['custom']['port'] = 80
-                  return request
-
-              # No healthy instance – scale up and return 503 so CloudFront retries
-              try:
-                  autoscaling.set_desired_capacity(
-                      AutoScalingGroupName=asg_name,
-                      DesiredCapacity=1,
-                      HonorCooldown=False
-                  )
-              except Exception as e:
-                  print(f"Scale-up error: {e}")
-
-              return {
-                  'status': '503',
-                  'statusDescription': 'Warming up code-server',
-                  'headers': {
-                      'retry-after': [{'key': 'Retry-After', 'value': '3'}],
-                      'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}],
-                      'content-type': [{'key': 'Content-Type', 'value': 'text/plain'}]
-                  },
-                  'body': 'Code-server is waking up – please retry in a few seconds.'
-              }
-
-  VSCodeScalerFunctionVersion:
-    Type: AWS::Lambda::Version
-    Condition: CreateNewLambdaEdgeFunction
-    Properties:
-      FunctionName: !Ref VSCodeScalerFunction
-      Description: !Sub "Version for ${AWS::StackName}"
-
-  # Instance Type Scaling Lambda Function
-  InstanceTypeScalerFunction:
-    Type: AWS::Lambda::Function
-    Properties:
-      FunctionName: !Sub ${AWS::StackName}-instance-type-scaler
-      Runtime: python3.11
-      Handler: index.lambda_handler
-      Role: !GetAtt LambdaEdgeExecutionRole.Arn
-      Timeout: 300
-      MemorySize: 256
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import time
-          import os
-          
-          def lambda_handler(event, context):
-              print(f"Received event: {json.dumps(event)}")
-              
-              # Parse SNS message
-              message = json.loads(event['Records'][0]['Sns']['Message'])
-              alarm_name = message['AlarmName']
-              new_state = message['NewStateValue']
-              
-              # Extract stack name from function ARN and derive ASG name
-              function_arn = context.invoked_function_arn
-              stack_name = function_arn.split(':')[6].replace('-instance-type-scaler', '')
-              asg_name = f"{stack_name}-vscode-asg"
-              region = 'us-east-1'
-              
-              autoscaling = boto3.client('autoscaling', region_name=region)
-              ec2 = boto3.client('ec2', region_name=region)
-              
-              # Extract stack name from environment or function ARN
-              function_arn = context.invoked_function_arn
-              stack_name = function_arn.split(':')[6].replace('-instance-type-scaler', '')
-              
-              # Tier mapping - derive template names from stack name
-              tier_templates = {
-                  'tier1': f"{stack_name}-vscode-tier1",
-                  'tier2': f"{stack_name}-vscode-tier2", 
-                  'tier3': f"{stack_name}-vscode-tier3"
-              }
-              
-              try:
-                  # Get current ASG configuration
-                  response = autoscaling.describe_auto_scaling_groups(
-                      AutoScalingGroupNames=[asg_name]
-                  )
-                  
-                  if not response['AutoScalingGroups']:
-                      print(f"ASG {asg_name} not found")
-                      return
-                  
-                  asg = response['AutoScalingGroups'][0]
-                  current_template = asg['LaunchTemplate']['LaunchTemplateId']
-                  instances = asg['Instances']
-                  
-                  # Determine target tier based on alarm
-                  if 'HighCPU' in alarm_name and new_state == 'ALARM':
-                      # Scale up
-                      if current_template == tier_templates['tier1']:
-                          target_tier = 'tier2'
-                      elif current_template == tier_templates['tier2']:
-                          target_tier = 'tier3'
-                      else:
-                          print("Already at highest tier")
-                          return
-                  elif 'LowCPU' in alarm_name and new_state == 'ALARM':
-                      # Scale down
-                      if current_template == tier_templates['tier3']:
-                          target_tier = 'tier2'
-                      elif current_template == tier_templates['tier2']:
-                          target_tier = 'tier1'
-                      else:
-                          print("Already at lowest tier")
-                          return
-                  else:
-                      print(f"No action needed for alarm: {alarm_name}, state: {new_state}")
-                      return
-                  
-                  print(f"Scaling to {target_tier}")
-                  
-                  # Update ASG launch template
-                  autoscaling.update_auto_scaling_group(
-                      AutoScalingGroupName=asg_name,
-                      LaunchTemplate={
-                          'LaunchTemplateName': tier_templates[target_tier],
-                          'Version': '$Latest'
-                      }
-                  )
-                  
-                  # If there are running instances, replace them
-                  if instances:
-                      for instance in instances:
-                          if instance['LifecycleState'] == 'InService':
-                              print(f"Terminating instance {instance['InstanceId']} for upgrade")
-                              autoscaling.terminate_instance_in_auto_scaling_group(
-                                  InstanceId=instance['InstanceId'],
-                                  ShouldDecrementDesiredCapacity=False
-                              )
-                  
-                  print(f"Successfully updated ASG to use {target_tier}")
-                  
-              except Exception as e:
-                  print(f"Error: {str(e)}")
-                  raise e
-
-  # SNS Topics for CloudWatch Alarms
-  HighCPUTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub ${AWS::StackName}-high-cpu
-      Subscription:
-        - Protocol: lambda
-          Endpoint: !GetAtt InstanceTypeScalerFunction.Arn
-
-  LowCPUTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      TopicName: !Sub ${AWS::StackName}-low-cpu
-      Subscription:
-        - Protocol: lambda
-          Endpoint: !GetAtt InstanceTypeScalerFunction.Arn
-
-  # Lambda Permissions for SNS
-  HighCPULambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref InstanceTypeScalerFunction
-      Action: lambda:InvokeFunction
-      Principal: sns.amazonaws.com
-      SourceArn: !Ref HighCPUTopic
-
-  LowCPULambdaPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref InstanceTypeScalerFunction
-      Action: lambda:InvokeFunction
-      Principal: sns.amazonaws.com
-      SourceArn: !Ref LowCPUTopic
-
-  # CloudWatch Alarms
-  HighCPUAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub ${AWS::StackName}-HighCPU
-      AlarmDescription: Triggers when CPU utilization is high
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 2
-      Threshold: 75
-      ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: AutoScalingGroupName
-          Value: !Ref VSCodeAutoScalingGroup
-      AlarmActions:
-        - !Ref HighCPUTopic
-      TreatMissingData: notBreaching
-
-  LowCPUAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub ${AWS::StackName}-LowCPU
-      AlarmDescription: Triggers when CPU utilization is consistently low
-      MetricName: CPUUtilization
-      Namespace: AWS/EC2
-      Statistic: Average
-      Period: 300
-      EvaluationPeriods: 6  # 30 minutes of low usage
-      Threshold: 20
-      ComparisonOperator: LessThanThreshold
-      Dimensions:
-        - Name: AutoScalingGroupName
-          Value: !Ref VSCodeAutoScalingGroup
-      AlarmActions:
-        - !Ref LowCPUTopic
-      TreatMissingData: notBreaching
 
 ### Empty S3 bucket resources ###
   EmptyS3BucketExecutionRole:
@@ -1679,18 +1305,7 @@ Resources:
                 Action:
                   - codewhisperer:GenerateRecommendations
                 Resource: '*'
-        - PolicyName: !Sub AutoScalingPolicy-${AWS::Region}
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - autoscaling:DescribeAutoScalingGroups
-                  - autoscaling:UpdateAutoScalingGroup
-                  - autoscaling:SetDesiredCapacity
-                  - ec2:DescribeInstances
-                  - ec2:DescribeInstanceStatus
-                Resource: '*'
+
 
   VSCodeInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -1888,190 +1503,6 @@ Resources:
               - Key: InstanceTier
                 Value: tier1
 
-  VSCodeLaunchTemplateTier2:
-    Type: AWS::EC2::LaunchTemplate
-    Properties:
-      LaunchTemplateName: !Sub ${AWS::StackName}-vscode-tier2
-      LaunchTemplateData:
-        ImageId: >-
-          {{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}
-        InstanceType: t3.small  # Tier 2: Medium workload
-        KeyName: !Ref DefaultKeyPair
-        SecurityGroupIds:
-          - !Ref SecurityGroup
-        IamInstanceProfile:
-          Arn: !GetAtt VSCodeInstanceProfile.Arn
-        BlockDeviceMappings:
-          - Ebs:
-              VolumeSize: !Ref InstanceVolumeSize
-              VolumeType: gp3
-              DeleteOnTermination: true
-              Encrypted: true
-            DeviceName: /dev/sda1
-        Monitoring:
-          Enabled: true
-        UserData:
-          Fn::Base64: !Sub |
-            #cloud-config
-            hostname: dev
-            runcmd:
-              - mkdir -p ${HomeFolder} && chown ubuntu:ubuntu ${HomeFolder}
-              - |
-                # Set Anthropic API key if provided
-                if [ "${AnthropicApiKey}" != "" ]; then
-                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /home/ubuntu/.bashrc
-                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /etc/environment
-                fi
-              - |
-                # Auto-shutdown script - checks every 5 minutes and shuts down if inactive
-                cat > /usr/local/bin/auto-shutdown.sh << 'EOF'
-                #!/bin/bash
-                
-                while true; do
-                  # Check for active SSH sessions
-                  ACTIVE_SESSIONS=$(who | wc -l)
-                  
-                  # Check for VSCode connections (nginx access logs in last 5 minutes)
-                  RECENT_ACCESS=$(find /var/log/nginx -name "access.log*" -mmin -5 | wc -l)
-                  
-                  # Check CPU usage (consider active if > 5%)
-                  CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | awk -F'%' '{print $1}')
-                  CPU_ACTIVE=$(echo "$CPU_USAGE > 5" | bc 2>/dev/null || echo 0)
-                  
-                  if [ "$ACTIVE_SESSIONS" -eq 0 ] && [ "$RECENT_ACCESS" -eq 0 ] && [ "$CPU_ACTIVE" -eq 0 ]; then
-                    echo "$(date): System appears idle, initiating shutdown in 30 seconds"
-                    shutdown -h +0.5 "Auto-shutdown: System has been idle for 5 minutes"
-                    break
-                  else
-                    echo "$(date): System active - Sessions: $ACTIVE_SESSIONS, Recent access: $RECENT_ACCESS, CPU: $CPU_USAGE%"
-                  fi
-                  
-                  sleep 300  # Check every 5 minutes
-                done
-                EOF
-                
-                chmod +x /usr/local/bin/auto-shutdown.sh
-                
-                # Create systemd service for auto-shutdown
-                cat > /etc/systemd/system/auto-shutdown.service << 'EOF'
-                [Unit]
-                Description=Auto Shutdown Service
-                After=multi-user.target
-                
-                [Service]
-                Type=simple
-                ExecStart=/usr/local/bin/auto-shutdown.sh
-                Restart=always
-                User=root
-                
-                [Install]
-                WantedBy=multi-user.target
-                EOF
-                
-                systemctl enable auto-shutdown.service
-                systemctl start auto-shutdown.service
-        TagSpecifications:
-          - ResourceType: instance
-            Tags:
-              - Key: SSMBootstrap
-                Value: True
-              - Key: Name
-                Value: !Sub ${AWS::StackName}-vscode-tier2
-              - Key: InstanceTier
-                Value: tier2
-
-  VSCodeLaunchTemplateTier3:
-    Type: AWS::EC2::LaunchTemplate
-    Properties:
-      LaunchTemplateName: !Sub ${AWS::StackName}-vscode-tier3
-      LaunchTemplateData:
-        ImageId: >-
-          {{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}
-        InstanceType: c6a.large  # Tier 3: Heavy workload
-        KeyName: !Ref DefaultKeyPair
-        SecurityGroupIds:
-          - !Ref SecurityGroup
-        IamInstanceProfile:
-          Arn: !GetAtt VSCodeInstanceProfile.Arn
-        BlockDeviceMappings:
-          - Ebs:
-              VolumeSize: !Ref InstanceVolumeSize
-              VolumeType: gp3
-              DeleteOnTermination: true
-              Encrypted: true
-            DeviceName: /dev/sda1
-        Monitoring:
-          Enabled: true
-        UserData:
-          Fn::Base64: !Sub |
-            #cloud-config
-            hostname: dev
-            runcmd:
-              - mkdir -p ${HomeFolder} && chown ubuntu:ubuntu ${HomeFolder}
-              - |
-                # Set Anthropic API key if provided
-                if [ "${AnthropicApiKey}" != "" ]; then
-                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /home/ubuntu/.bashrc
-                  echo 'export ANTHROPIC_API_KEY=${AnthropicApiKey}' >> /etc/environment
-                fi
-              - |
-                # Auto-shutdown script - checks every 5 minutes and shuts down if inactive
-                cat > /usr/local/bin/auto-shutdown.sh << 'EOF'
-                #!/bin/bash
-                
-                while true; do
-                  # Check for active SSH sessions
-                  ACTIVE_SESSIONS=$(who | wc -l)
-                  
-                  # Check for VSCode connections (nginx access logs in last 5 minutes)
-                  RECENT_ACCESS=$(find /var/log/nginx -name "access.log*" -mmin -5 | wc -l)
-                  
-                  # Check CPU usage (consider active if > 5%)
-                  CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | awk -F'%' '{print $1}')
-                  CPU_ACTIVE=$(echo "$CPU_USAGE > 5" | bc 2>/dev/null || echo 0)
-                  
-                  if [ "$ACTIVE_SESSIONS" -eq 0 ] && [ "$RECENT_ACCESS" -eq 0 ] && [ "$CPU_ACTIVE" -eq 0 ]; then
-                    echo "$(date): System appears idle, initiating shutdown in 30 seconds"
-                    shutdown -h +0.5 "Auto-shutdown: System has been idle for 5 minutes"
-                    break
-                  else
-                    echo "$(date): System active - Sessions: $ACTIVE_SESSIONS, Recent access: $RECENT_ACCESS, CPU: $CPU_USAGE%"
-                  fi
-                  
-                  sleep 300  # Check every 5 minutes
-                done
-                EOF
-                
-                chmod +x /usr/local/bin/auto-shutdown.sh
-                
-                # Create systemd service for auto-shutdown
-                cat > /etc/systemd/system/auto-shutdown.service << 'EOF'
-                [Unit]
-                Description=Auto Shutdown Service
-                After=multi-user.target
-                
-                [Service]
-                Type=simple
-                ExecStart=/usr/local/bin/auto-shutdown.sh
-                Restart=always
-                User=root
-                
-                [Install]
-                WantedBy=multi-user.target
-                EOF
-                
-                systemctl enable auto-shutdown.service
-                systemctl start auto-shutdown.service
-        TagSpecifications:
-          - ResourceType: instance
-            Tags:
-              - Key: SSMBootstrap
-                Value: True
-              - Key: Name
-                Value: !Sub ${AWS::StackName}-vscode-tier3
-              - Key: InstanceTier
-                Value: tier3
-
   # Auto Scaling Group
   VSCodeAutoScalingGroup:
     Type: AWS::AutoScaling::AutoScalingGroup
@@ -2080,35 +1511,24 @@ Resources:
       LaunchTemplate:
         LaunchTemplateId: !Ref VSCodeLaunchTemplateTier1
         Version: !GetAtt VSCodeLaunchTemplateTier1.LatestVersionNumber
-      MinSize: 0
-      MaxSize: 1
+      MinSize: 1
       DesiredCapacity: 1
-      VPCZoneIdentifier:
-        - !Ref PublicSubnetOne
-        - !Ref PublicSubnetTwo
+      MaxSize: 1
+      VPCZoneIdentifier: [ !Ref PublicSubnetOne, !Ref PublicSubnetTwo ]
       HealthCheckType: EC2
       HealthCheckGracePeriod: 300
-      Tags:
-        - Key: Name
-          Value: !Sub ${AWS::StackName}-vscode-asg
-          PropagateAtLaunch: false
-        - Key: CurrentTier
-          Value: tier1
-          PropagateAtLaunch: false
 
   ########### CloudFront Resources ###########
   VSCodeInstanceCachePolicy:
     Type: AWS::CloudFront::CachePolicy
     Properties:
       CachePolicyConfig:
+        Name: !Sub VSCode-${AWS::StackName}
         DefaultTTL: 86400
         MaxTTL: 31536000
         MinTTL: 1
-        Name: !Sub 'VSCodeServer-${AWS::StackName}'
         ParametersInCacheKeyAndForwardedToOrigin:
-          CookiesConfig:
-            CookieBehavior: all
-          EnableAcceptEncodingGzip: False
+          CookiesConfig: { CookieBehavior: all }
           HeadersConfig:
             HeaderBehavior: whitelist
             Headers:
@@ -2121,36 +1541,29 @@ Resources:
               - Accept-Language
               - Accept-Encoding
               - Accept-Datetime
-          QueryStringsConfig:
-            QueryStringBehavior: all
+          QueryStringsConfig: { QueryStringBehavior: all }
+
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
       DistributionConfig:
-        Enabled: True
+        Enabled: true
         HttpVersion: http2
         CustomErrorResponses:
           - ErrorCode: 503
             ErrorCachingMinTTL: 0
         DefaultCacheBehavior:
-          AllowedMethods:
-            - GET
-            - HEAD
-            - OPTIONS
-            - PUT
-            - PATCH
-            - POST
-            - DELETE
+          AllowedMethods: [GET,HEAD,OPTIONS,PUT,PATCH,POST,DELETE]
           CachePolicyId: !Ref VSCodeInstanceCachePolicy
-          Compress: True
+          Compress: true
           TargetOriginId: VSCodeOrigin
           ViewerProtocolPolicy: redirect-to-https
         Origins:
           - Id: VSCodeOrigin
+            DomainName: !Ref VSCodeOriginDNS     # was “placeholder.example.com”
             CustomOriginConfig:
               HTTPPort: 80
               OriginProtocolPolicy: http-only
-            DomainName: placeholder.example.com
 
 Outputs:
   VSCodeServerPassword:
