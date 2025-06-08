@@ -1160,136 +1160,77 @@ Resources:
         ZipFile: |
           import json
           import boto3
-          import time
           import os
-          
+
           def lambda_handler(event, context):
-              # Lambda@Edge origin request event
+              # CloudFront origin-request event
               request = event['Records'][0]['cf']['request']
-              
-              # Extract stack name from function name (since we can't use env vars in Lambda@Edge)
+
+              # Derive stack and ASG name
               function_name = context.function_name
               stack_name = function_name.replace('-vscode-scaler', '')
               asg_name = f"{stack_name}-vscode-asg"
-              # Lambda@Edge runs in us-east-1 but our resources are in the actual region
-              region = '${AWS::Region}'
-              
-              # Initialize clients
+              region = os.environ.get('AWS_REGION', 'us-east-1')
+
               autoscaling = boto3.client('autoscaling', region_name=region)
               ec2 = boto3.client('ec2', region_name=region)
-              
+
+              def healthy_instance_ip():
+                  try:
+                      asg = autoscaling.describe_auto_scaling_groups(
+                          AutoScalingGroupNames=[asg_name]
+                      )['AutoScalingGroups']
+                      if not asg:
+                          return None
+                      instances = asg[0]['Instances']
+                      if not instances:
+                          return None
+                      in_service = [i['InstanceId'] for i in instances
+                                    if i['LifecycleState'] == 'InService']
+                      if not in_service:
+                          return None
+                      statuses = ec2.describe_instance_status(
+                          InstanceIds=in_service
+                      )['InstanceStatuses']
+                      healthy_ids = [
+                          s['InstanceId'] for s in statuses
+                          if s['InstanceStatus']['Status'] == 'ok' and s['SystemStatus']['Status'] == 'ok'
+                      ]
+                      if not healthy_ids:
+                          return None
+                      desc = ec2.describe_instances(InstanceIds=[healthy_ids[0]])
+                      return desc['Reservations'][0]['Instances'][0].get('PublicIpAddress')
+                  except Exception as e:
+                      print(f"Health-check error: {e}")
+                      return None
+
+              ip = healthy_instance_ip()
+              if ip:
+                  request['origin']['custom']['domainName'] = ip
+                  request['origin']['custom']['protocol'] = 'http'
+                  request['origin']['custom']['port'] = 80
+                  return request
+
+              # No healthy instance – scale up and return 503 so CloudFront retries
               try:
-                  # Check current ASG state
-                  response = autoscaling.describe_auto_scaling_groups(
-                      AutoScalingGroupNames=[asg_name]
+                  autoscaling.set_desired_capacity(
+                      AutoScalingGroupName=asg_name,
+                      DesiredCapacity=1,
+                      HonorCooldown=False
                   )
-                  
-                  if not response['AutoScalingGroups']:
-                      return {
-                          'status': '503',
-                          'statusDescription': 'Service Unavailable',
-                          'body': 'Auto Scaling Group not found'
-                      }
-                  
-                  asg = response['AutoScalingGroups'][0]
-                  instances = asg['Instances']
-                  
-                  # If no instances, scale up with tier1 template
-                  if not instances:
-                      print(f"No instances found, scaling up ASG: {asg_name}")
-                      
-                      # Ensure we're using tier1 template for new instances
-                      tier1_template = f"{stack_name}-vscode-tier1"
-                      try:
-                          autoscaling.update_auto_scaling_group(
-                              AutoScalingGroupName=asg_name,
-                              LaunchTemplate={
-                                  'LaunchTemplateName': tier1_template,
-                                  'Version': '$Latest'
-                              }
-                          )
-                      except Exception as e:
-                          print(f"Could not update launch template: {e}")
-                      
-                      autoscaling.set_desired_capacity(
-                          AutoScalingGroupName=asg_name,
-                          DesiredCapacity=1,
-                          HonorCooldown=False
-                      )
-                      
-                      # Wait for instance to be ready (max 3 minutes for Lambda@Edge)
-                      max_wait = 180  # 3 minutes
-                      wait_time = 0
-                      
-                      while wait_time < max_wait:
-                          time.sleep(10)
-                          wait_time += 10
-                          
-                          # Check for running instances
-                          response = autoscaling.describe_auto_scaling_groups(
-                              AutoScalingGroupNames=[asg_name]
-                          )
-                          instances = response['AutoScalingGroups'][0]['Instances']
-                          
-                          for instance in instances:
-                              if instance['LifecycleState'] == 'InService':
-                                  # Get instance details
-                                  ec2_response = ec2.describe_instances(
-                                      InstanceIds=[instance['InstanceId']]
-                                  )
-                                  
-                                  if ec2_response['Reservations']:
-                                      instance_details = ec2_response['Reservations'][0]['Instances'][0]
-                                      if instance_details['State']['Name'] == 'running':
-                                          # Update origin to point to new instance
-                                          public_ip = instance_details.get('PublicIpAddress')
-                                          if public_ip:
-                                              request['origin']['custom']['domainName'] = public_ip
-                                              request['origin']['custom']['protocol'] = 'http'
-                                              request['origin']['custom']['port'] = 80
-                                              print(f"Instance ready: {public_ip}")
-                                              return request
-                      
-                      # If we get here, instance didn't start in time
-                      return {
-                          'status': '503',
-                          'statusDescription': 'Service Unavailable',
-                          'body': 'Instance is starting, please try again in a few minutes'
-                      }
-                  
-                  # Instance exists, check if it's healthy
-                  for instance in instances:
-                      if instance['LifecycleState'] == 'InService':
-                          # Get instance details
-                          ec2_response = ec2.describe_instances(
-                              InstanceIds=[instance['InstanceId']]
-                          )
-                          
-                          if ec2_response['Reservations']:
-                              instance_details = ec2_response['Reservations'][0]['Instances'][0]
-                              if instance_details['State']['Name'] == 'running':
-                                  # Update origin to point to existing instance
-                                  public_ip = instance_details.get('PublicIpAddress')
-                                  if public_ip:
-                                      request['origin']['custom']['domainName'] = public_ip
-                                      request['origin']['custom']['protocol'] = 'http'
-                                      request['origin']['custom']['port'] = 80
-                                      return request
-                  
-                  # No healthy instances found
-                  return {
-                      'status': '503',
-                      'statusDescription': 'Service Unavailable',
-                      'body': 'No healthy instances available'
-                  }
-                  
               except Exception as e:
-                  print(f"Error: {str(e)}")
-                  return {
-                      'status': '500',
-                      'statusDescription': 'Internal Server Error',
-                      'body': 'Error processing request'
-                  }
+                  print(f"Scale-up error: {e}")
+
+              return {
+                  'status': '503',
+                  'statusDescription': 'Warming up code-server',
+                  'headers': {
+                      'retry-after': [{'key': 'Retry-After', 'value': '3'}],
+                      'cache-control': [{'key': 'Cache-Control', 'value': 'no-store'}],
+                      'content-type': [{'key': 'Content-Type', 'value': 'text/plain'}]
+                  },
+                  'body': 'Code-server is waking up – please retry in a few seconds.'
+              }
 
   VSCodeScalerFunctionVersion:
     Type: AWS::Lambda::Version
@@ -2189,6 +2130,11 @@ Resources:
       DistributionConfig:
         Enabled: True
         HttpVersion: http2
+        CustomErrorResponses:
+          - ErrorCode: 503
+            ResponsePagePath: ""
+            ResponseCode: 503
+            ErrorCachingMinTTL: 0
         DefaultCacheBehavior:
           AllowedMethods:
             - GET
@@ -2199,18 +2145,15 @@ Resources:
             - POST
             - DELETE
           CachePolicyId: !Ref VSCodeInstanceCachePolicy
-          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 # Managed-AllViewer
-          TargetOriginId: !Sub CloudFront-${AWS::StackName}
-          ViewerProtocolPolicy: allow-all
-          LambdaFunctionAssociations:
-            - EventType: origin-request
-              LambdaFunctionARN: !If [CreateNewLambdaEdgeFunction, !Ref VSCodeScalerFunctionVersion, !Ref ExistingLambdaEdgeFunctionArn]
-              IncludeBody: false
+          Compress: True
+          TargetOriginId: VSCodeOrigin
+          ViewerProtocolPolicy: redirect-to-https
         Origins:
-          - DomainName: placeholder.example.com  # Will be dynamically updated by Lambda@Edge
-            Id: !Sub CloudFront-${AWS::StackName}
+          - Id: VSCodeOrigin
             CustomOriginConfig:
+              HTTPPort: 80
               OriginProtocolPolicy: http-only
+            DomainName: placeholder.example.com
 
 Outputs:
   VSCodeServerPassword:
