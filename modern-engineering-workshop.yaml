@@ -2123,7 +2123,6 @@ Resources:
               - Accept-Datetime
           QueryStringsConfig:
             QueryStringBehavior: all
-
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -2132,8 +2131,6 @@ Resources:
         HttpVersion: http2
         CustomErrorResponses:
           - ErrorCode: 503
-            ResponsePagePath: ""
-            ResponseCode: 503
             ErrorCachingMinTTL: 0
         DefaultCacheBehavior:
           AllowedMethods:
