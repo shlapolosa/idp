@@ -287,15 +287,6 @@ Resources:
     Type: AWS::CloudFormation::WaitConditionHandle
 
 
-  WaitCondition:
-    Type: AWS::CloudFormation::WaitCondition
-    Condition: IsInitialDeployment
-    DependsOn: VSCodeAutoScalingGroup
-    Properties:
-      Handle: !Ref WaitHandle
-      Timeout: '7200'          # 2 h
-      Count: 1                 # << previously 4
-
   # Note: IDP Platform URLs and passwords will be populated by the Karpenter setup script
   # These parameters will be updated after vClusters and applications are deployed
 
@@ -795,57 +786,6 @@ Resources:
                 - curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
                 - chmod +x ./kubectl-argo-rollouts-linux-amd64
                 - sudo mv ./kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
-          - action: aws:runShellScript
-            name: ConfigureRolesAndAccessToCluster
-            inputs:
-              runCommand:
-                - export AWS_ACCOUNT=$(aws sts get-caller-identity --query "Account" --output text)
-                - !Sub |
-                  # Check if any EKS clusters exist at all
-                  clusters_found=0
-                  
-                  # Check if clusters exist before configuring IAM mappings
-                  configure_iam_mapping() {
-                    local cluster_name=$1
-                    local role_arn=$2
-                    if aws eks describe-cluster --name $cluster_name --region=${AWS::Region} >/dev/null 2>&1; then
-                      echo "✅ Configuring IAM mapping for cluster: $cluster_name, role: $role_arn"
-                      if eksctl create iamidentitymapping --cluster $cluster_name --region=${AWS::Region} \
-                        --arn $role_arn --username admin --group system:masters \
-                        --no-duplicate-arns; then
-                        echo "✅ Successfully created IAM mapping for $cluster_name"
-                      else
-                        echo "⚠️  Failed to create IAM mapping for $cluster_name with $role_arn (may already exist)"
-                      fi
-                      clusters_found=$((clusters_found + 1))
-                    else
-                      echo "ℹ️  Cluster $cluster_name does not exist, skipping IAM mapping"
-                    fi
-                  }
-                  
-                  echo "🔧 Starting IAM role configuration for EKS clusters..."
-                  
-                  # Configure IAM mappings for VSCodeInstanceRole
-                  configure_iam_mapping "modern-engineering" "arn:aws:iam::${AWS::AccountId}:role/developer-env-VSCodeInstanceRole"
-                  configure_iam_mapping "modernengg-dev" "arn:aws:iam::${AWS::AccountId}:role/developer-env-VSCodeInstanceRole"
-                  configure_iam_mapping "modernengg-prod" "arn:aws:iam::${AWS::AccountId}:role/developer-env-VSCodeInstanceRole"
-                  
-                  # Configure IAM mappings for WSOpsRole
-                  configure_iam_mapping "modern-engineering" "arn:aws:iam::${AWS::AccountId}:role/WSOpsRole"
-                  configure_iam_mapping "modernengg-dev" "arn:aws:iam::${AWS::AccountId}:role/WSOpsRole"
-                  configure_iam_mapping "modernengg-prod" "arn:aws:iam::${AWS::AccountId}:role/WSOpsRole"
-                  
-                  # Configure IAM mappings for WSParticipantRole
-                  configure_iam_mapping "modern-engineering" "arn:aws:iam::${AWS::AccountId}:role/WSParticipantRole"
-                  configure_iam_mapping "modernengg-dev" "arn:aws:iam::${AWS::AccountId}:role/WSParticipantRole"
-                  configure_iam_mapping "modernengg-prod" "arn:aws:iam::${AWS::AccountId}:role/WSParticipantRole"
-                  
-                  if [ $clusters_found -eq 0 ]; then
-                    echo "ℹ️  No EKS clusters found. This is normal if cluster setup was skipped or if using vCluster-only setup."
-                    echo "✅ IAM configuration completed (no clusters to configure)"
-                  else
-                    echo "✅ IAM configuration completed for $clusters_found cluster(s)"
-                  fi
           - action: aws:runShellScript
             name: UpdateOutputs
             inputs:
@@ -1528,7 +1468,10 @@ Resources:
         MaxTTL: 31536000
         MinTTL: 1
         ParametersInCacheKeyAndForwardedToOrigin:
-          CookiesConfig: { CookieBehavior: all }
+          EnableAcceptEncodingGzip:   true   # required
+          EnableAcceptEncodingBrotli: true   # optional but useful
+          CookiesConfig:
+            CookieBehavior: all
           HeadersConfig:
             HeaderBehavior: whitelist
             Headers:
@@ -1539,9 +1482,11 @@ Resources:
               - Referer
               - Host
               - Accept-Language
-              - Accept-Encoding
               - Accept-Datetime
-          QueryStringsConfig: { QueryStringBehavior: all }
+              #  ⬆︎  **NO Accept-Encoding here**
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
 
   CloudFrontDistribution:
     Type: AWS::CloudFront::Distribution
