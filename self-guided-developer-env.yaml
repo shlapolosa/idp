@@ -12,10 +12,9 @@ Parameters:
   InstanceType:
     Description: Type of EC2 instance to launch
     Type: String
-    Default: c6a.2xlarge
+    Default: t3.medium
     AllowedValues: [
-      c6a.large, c6a.xlarge, c6a.2xlarge, c6a.4xlarge, c6a.8xlarge, c6a.12xlarge, c6a.16xlarge, c6a.24xlarge, c6a.32xlarge, c6a.48xlarge
-
+      t3.micro, t3.small, t3.medium, t3.large
     ]
   HomeFolder:
     Type: String
@@ -665,6 +664,7 @@ Resources:
               runCommand:
                 - '#!/bin/bash'
                 - !Sub |
+                  export HOME=${HomeFolder}
                   cd ${HomeFolder}
                   git clone ${BlueprintsRepo} appmod-blueprints
                   cd appmod-blueprints
@@ -712,6 +712,7 @@ Resources:
             inputs:
               runCommand:
                 - !Sub cd ${HomeFolder}
+                - export HOME=${HomeFolder}
                 - export DNS_ENGINEERING=$(aws elbv2 describe-load-balancers | jq '.LoadBalancers[] | select(.LoadBalancerName == "modern-engg") | .DNSName' | tr -d '"')
                 - sudo git config --system --add safe.directory /modern-engineering-aws
                 - sudo git config --system user.email "workshop@example.com"
@@ -772,6 +773,85 @@ Resources:
                   eksctl create iamidentitymapping --cluster modernengg-prod --region=us-west-2 \
                   --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSParticipantRole --username admin --group system:masters \
                   --no-duplicate-arns
+
+          - action: aws:runShellScript
+            name: DownloadIDPSetupScript
+            inputs:
+              timeoutSeconds: '7200'
+              runCommand:
+                - '#!/bin/bash'
+                - !Sub |
+                  cd ${HomeFolder}
+                  export HOME=${HomeFolder}
+                  # Configure git for the workshop
+                  sudo -u ubuntu git config --global user.email "participant@workshops.aws"
+                  sudo -u ubuntu git config --global user.name "Workshop Participant"
+                  sudo -u ubuntu git config --global init.defaultBranch "main"
+                  git config --global --add safe.directory ${HomeFolder}
+                  git config --global user.email "workshop@example.com"
+                  git config --global user.name "WorkshopParticipant"
+                  
+                  # Clone/Update IDP repository
+                  if [ -d "idp-setup" ]; then
+                    echo "📥 Updating existing IDP repository..."
+                    cd idp-setup
+                    git fetch origin
+                    git reset --hard origin/${BlueprintsBranch}
+                    git switch ${BlueprintsBranch}
+                    cd ..
+                  else
+                    echo "📥 Cloning IDP repository..."
+                    git clone https://github.com/shlapolosa/idp idp-setup
+                    cd idp-setup
+                    git switch ${BlueprintsBranch}
+                    cd ..
+                  fi
+                  cd idp-setup
+                  chmod +x setup-karpenter-vclusters.sh
+                  
+                  # Determine setup choice based on parameter
+                  choice=2
+                  
+                  case $choice in
+                      2)
+                          echo "Setting up Karpenter + vCluster environment..."
+                          echo "Using Karpenter setup script for optimal node management"
+                          export CLOUD_PROVIDER=aws
+                          export CLUSTER_NAME=modern-engineering-virtual
+                          export REGION=${AWS::Region}
+                          export KARPENTER_VERSION=0.16.3
+                          export VCLUSTER_VERSION=0.20.0
+                          export K8S_VERSION=1.31
+                          ./setup-karpenter-vclusters.sh
+                          echo "✅ Karpenter + vCluster environment created successfully"
+                          ;;
+                      3)
+                          echo "Skipping cluster setup - code-server only mode"
+                          ;;
+                  esac
+                  
+                  # --- after your EKS aliases ---
+                  # vCluster aliases
+                  for v in modern-engineering modernengg-dev modernengg-prod; do
+                    # Connect (in the background) and merge into ~/.kube/config
+                    vcluster connect "$v" \
+                      --namespace "vcluster-$v" \
+                      --kubeconfig "/home/ubuntu/.kube/config" &
+
+                    # Create a short alias, e.g. `ve`, `vd`, `vp`
+                    short=$(echo $v | sed -E 's/^modernengg-//;s/modern-engineering/e/;s/-engg-dev/d/;s/-engg-prod/p/')
+                    echo "alias v$short='kubectl config use-context vcluster-$v'" >> /home/ubuntu/.bashrc
+                  done
+
+
+                  # Download and setup kubeconfig manager
+                  curl -fsSL https://raw.githubusercontent.com/shlapolosa/idp/main/kubeconfig-vault-manager.sh -o kubeconfig-vault-manager.sh
+                  chmod +x kubeconfig-vault-manager.sh
+                  ./kubeconfig-vault-manager.sh setup
+                  
+                  # Set ownership
+                  sudo chown ubuntu:ubuntu ${HomeFolder} -R
+
           - action: aws:runShellScript
             name: UpdateOutputs
             inputs:
