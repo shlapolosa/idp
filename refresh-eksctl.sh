@@ -38,4 +38,3 @@ export AWS_REGION="$aws_region"
 export AWS_DEFAULT_REGION="$aws_region"
 
 # 8. Now list clusters
-eksctl get cluster --region "$aws_region"

@@ -1,0 +1,18 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Federated": "arn:aws:iam::263350857079:oidc-provider/"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+                "StringEquals": {
+                    ":aud": "sts.amazonaws.com",
+                    ":sub": "system:serviceaccount:kube-system:karpenter"
+                }
+            }
+        }
+    ]
+}

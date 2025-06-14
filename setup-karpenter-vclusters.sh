@@ -145,6 +145,7 @@ create_eks_cluster() {
     info "EKS cluster exists, skipping creation"
   else
     info "Creating EKS cluster with a small bootstrap nodegroup…"
+
     eksctl create cluster \
       --name "${CLUSTER_NAME}" \
       --region "${REGION}" \
@@ -152,7 +153,8 @@ create_eks_cluster() {
       --with-oidc \
       --tags "karpenter.sh/discovery=${CLUSTER_NAME}" \
       --nodegroup-name bootstrap \
-      --node-type t3.medium \
+      --node-type t3.large \
+      --spot \
       --nodes 1 \
       --nodes-min 1 \
       --nodes-max 2
