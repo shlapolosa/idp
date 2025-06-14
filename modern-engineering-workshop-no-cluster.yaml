@@ -12,9 +12,9 @@ Parameters:
   InstanceType:
     Description: Type of EC2 instance to launch
     Type: String
-    Default: c6a.2xlarge
+    Default: m5.large
     AllowedValues: [
-      c6a.large, c6a.xlarge, c6a.2xlarge, c6a.4xlarge, c6a.8xlarge, c6a.12xlarge, c6a.16xlarge, c6a.24xlarge, c6a.32xlarge, c6a.48xlarge
+      m5.large, c6a.large, c6a.xlarge, c6a.2xlarge, c6a.4xlarge, c6a.8xlarge, c6a.12xlarge, c6a.16xlarge, c6a.24xlarge, c6a.32xlarge, c6a.48xlarge
 
     ]
   HomeFolder:
@@ -676,13 +676,7 @@ Resources:
                   git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/java.git
                   git -c http.sslVerify=false clone https://giteaAdmin:mysecretgiteapassword!@${DNS_ENGINEERING}/gitea/giteaAdmin/platform.git
 
-                  git clone git@github.com:shlapolosa/idp.git
-                  cd idp
-                  git switch main
-                  cd ..
-
                 - !Sub sudo chown ubuntu:ubuntu ${HomeFolder} -R
-                - !Sub sudo chown ubuntu:ubuntu idp -R
           - action: aws:runShellScript
             name: InstallK9s
             inputs:
@@ -697,39 +691,6 @@ Resources:
                 - curl -LO https://github.com/argoproj/argo-rollouts/releases/latest/download/kubectl-argo-rollouts-linux-amd64
                 - chmod +x ./kubectl-argo-rollouts-linux-amd64
                 - sudo mv ./kubectl-argo-rollouts-linux-amd64 /usr/local/bin/kubectl-argo-rollouts
-          - action: aws:runShellScript
-            name: ConfigureRolesAndAccessToCluster
-            inputs:
-              runCommand:
-                - export AWS_ACCOUNT=$(aws sts get-caller-identity --query "Account" --output text)
-                - |
-                  eksctl create iamidentitymapping --cluster modern-engineering --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/developer-env-VSCodeInstanceRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modernengg-dev --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/developer-env-VSCodeInstanceRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modernengg-prod --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/developer-env-VSCodeInstanceRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modern-engineering --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSOpsRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modernengg-dev --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSOpsRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modernengg-prod --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSOpsRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modern-engineering --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSParticipantRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modernengg-dev --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSParticipantRole --username admin --group system:masters \
-                  --no-duplicate-arns
-                  eksctl create iamidentitymapping --cluster modernengg-prod --region=us-west-2 \
-                  --arn arn:aws:iam::${AWS_ACCOUNT}:role/WSParticipantRole --username admin --group system:masters \
-                  --no-duplicate-arns
           - action: aws:runShellScript
             name: UpdateOutputs
             inputs:
